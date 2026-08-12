@@ -1,0 +1,1085 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cardio Drum Dashboard — BLE</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<style>
+:root {
+  --bg:       #0e0e0f;
+  --bg2:      #161618;
+  --bg3:      #1e1e21;
+  --bg4:      #26262a;
+  --border:   rgba(255,255,255,.08);
+  --border2:  rgba(255,255,255,.14);
+  --text:     #e8e8ea;
+  --text2:    #888890;
+  --text3:    #55555c;
+  --green:    #4ade80;
+  --green-bg: rgba(74,222,128,.1);
+  --red:      #f87171;
+  --red-bg:   rgba(248,113,113,.1);
+  --amber:    #fbbf24;
+  --amber-bg: rgba(251,191,36,.1);
+  --blue:     #60a5fa;
+  --blue-bg:  rgba(96,165,250,.1);
+  --force:    #f87171;
+  --vel:      #60a5fa;
+  --power:    #4ade80;
+  --r:  6px;
+  --r2: 10px;
+  --font: 'IBM Plex Sans', sans-serif;
+  --mono: 'IBM Plex Mono', monospace;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html { background: var(--bg); color: var(--text); font-family: var(--font); font-size: 14px; }
+body { max-width: 1400px; margin: 0 auto; padding: 20px 24px 60px; }
+
+.header { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; flex-wrap: wrap; }
+.header h1 { font-size: 15px; font-weight: 600; letter-spacing: .04em; }
+.header-sub { font-size: 12px; color: var(--text3); font-family: var(--mono); }
+.spacer { flex: 1; }
+.pill { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 500;
+        padding: 4px 10px; border-radius: 20px; background: var(--bg3); border: 1px solid var(--border); color: var(--text2); }
+.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text3); flex-shrink: 0; }
+.dot.on  { background: var(--green); box-shadow: 0 0 6px var(--green); }
+.dot.rec { background: var(--red);   animation: blink 1s infinite; }
+@keyframes blink { 0%,100%{opacity:1} 50%{opacity:.25} }
+.secure-note { font-size: 11px; color: var(--text3); font-family: var(--mono); margin-bottom: 16px; }
+
+.tabs { display: flex; gap: 1px; margin-bottom: 18px; border-bottom: 1px solid var(--border); }
+.tab { font-size: 13px; font-weight: 500; padding: 8px 14px; background: none; border: none;
+       color: var(--text2); cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px; transition: color .15s; }
+.tab:hover { color: var(--text); }
+.tab.active { color: var(--text); border-bottom-color: var(--text); }
+.panel { display: none; }
+.panel.active { display: block; }
+
+button { font-family: var(--font); font-size: 13px; font-weight: 500; padding: 7px 14px;
+          border-radius: var(--r); border: 1px solid var(--border2); background: var(--bg3);
+          color: var(--text); cursor: pointer; transition: background .15s, opacity .15s; }
+button:hover { background: var(--bg4); }
+button:active { opacity: .75; }
+button:disabled { opacity: .3; cursor: not-allowed; }
+.btn-green { background: var(--green-bg); border-color: rgba(74,222,128,.3); color: var(--green); }
+.btn-green:hover { background: rgba(74,222,128,.18); }
+.btn-red   { background: var(--red-bg);   border-color: rgba(248,113,113,.3); color: var(--red); }
+.btn-red:hover   { background: rgba(248,113,113,.18); }
+.btn-amber { background: var(--amber-bg); border-color: rgba(251,191,36,.3);  color: var(--amber); }
+.btn-amber:hover { background: rgba(251,191,36,.18); }
+
+.card { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--r2); padding: 14px 16px; margin-bottom: 12px; }
+.card-title { font-size: 11px; font-weight: 500; letter-spacing: .08em; text-transform: uppercase; color: var(--text3); margin-bottom: 10px; }
+
+.controls { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
+.esp-info { font-size: 11px; color: var(--text3); font-family: var(--mono); padding: 4px 0 10px; min-height: 18px; }
+
+/* Resistance slider */
+.slider-row { display: flex; align-items: center; gap: 14px; }
+input[type=range] { -webkit-appearance: none; appearance: none; flex: 1; height: 6px; border-radius: 3px;
+  background: var(--bg4); outline: none; }
+input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 18px; height: 18px;
+  border-radius: 50%; background: var(--amber); cursor: pointer; box-shadow: 0 0 6px rgba(251,191,36,.6); }
+input[type=range]::-moz-range-thumb { width: 18px; height: 18px; border: none; border-radius: 50%;
+  background: var(--amber); cursor: pointer; }
+input[type=range]:disabled { opacity: .4; }
+.slider-val { font-family: var(--mono); font-size: 22px; font-weight: 500; width: 80px; text-align: right; color: var(--amber); }
+
+/* Gauge dials */
+.dials { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; margin-bottom: 12px; }
+@media (max-width: 780px) { .dials { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 480px) { .dials { grid-template-columns: 1fr; } }
+.dial-card { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--r2); padding: 14px 16px; display: flex; flex-direction: column; align-items: center; }
+.dial-card canvas { width: 100%; max-width: 320px; height: auto; }
+
+.metrics { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 8px; margin-bottom: 10px; }
+@media (max-width: 560px) { .metrics { grid-template-columns: repeat(3, minmax(0,1fr)); } }
+.metric { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--r2); padding: 12px 14px; }
+.m-label { font-size: 11px; font-weight: 500; text-transform: uppercase; letter-spacing: .07em; color: var(--text3); margin-bottom: 6px; display: flex; align-items: center; gap: 6px; }
+.m-tag { width: 8px; height: 8px; border-radius: 2px; flex-shrink: 0; }
+.m-val  { font-size: 24px; font-weight: 500; font-family: var(--mono); line-height: 1; }
+.m-unit { font-size: 11px; color: var(--text3); font-family: var(--mono); margin-top: 3px; }
+
+.total-row { display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+             background: var(--bg2); border: 1px solid var(--border); border-radius: var(--r2); padding: 12px 16px; margin-bottom: 10px; }
+.total-main { font-size: 32px; font-weight: 500; font-family: var(--mono); color: var(--green); }
+.total-unit { font-size: 13px; color: var(--text3); }
+
+.chart-wrap { position: relative; height: 240px; }
+.chart-legend { display: flex; gap: 16px; flex-wrap: wrap; font-size: 11px; color: var(--text2); margin-bottom: 8px; }
+.chart-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.chart-legend i { width: 12px; height: 3px; border-radius: 2px; display: inline-block; }
+
+/* Auto workout */
+.workout-phase { font-size: 11px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase;
+  padding: 3px 10px; border-radius: 20px; background: var(--bg3); border: 1px solid var(--border); color: var(--text2); }
+.workout-phase.armed { color: var(--blue);  border-color: rgba(96,165,250,.35);  background: var(--blue-bg); }
+.workout-phase.ramp  { color: var(--amber); border-color: rgba(251,191,36,.35);  background: var(--amber-bg); }
+.workout-phase.hold  { color: var(--green); border-color: rgba(74,222,128,.35);  background: var(--green-bg); }
+
+/* Header workout indicator */
+.workout-pill.on   { color: var(--amber); border-color: rgba(251,191,36,.35); background: var(--amber-bg); }
+#workout-dot.armed { background: var(--blue);  box-shadow: 0 0 6px var(--blue); }
+#workout-dot.ramp  { background: var(--amber); box-shadow: 0 0 6px var(--amber); animation: blink 1s infinite; }
+#workout-dot.hold  { background: var(--green); box-shadow: 0 0 6px var(--green); }
+.workout-progress { height: 6px; border-radius: 3px; background: var(--bg4); overflow: hidden; margin: 4px 0 8px; }
+.workout-progress-bar { height: 100%; width: 0%; border-radius: 3px; background: var(--amber);
+  box-shadow: 0 0 6px rgba(251,191,36,.5); transition: width .2s linear; }
+.workout-info { font-size: 11px; color: var(--text3); font-family: var(--mono); line-height: 1.6; }
+
+.log { background: var(--bg); border: 1px solid var(--border); border-radius: var(--r);
+       height: 110px; overflow-y: auto; padding: 6px 10px; font-family: var(--mono); font-size: 11px; color: var(--text3); }
+.log-line { padding: 1px 0; }
+.log-ok   { color: var(--green); }
+.log-warn { color: var(--amber); }
+.log-err  { color: var(--red); }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>CARDIO DRUM</h1>
+  <span class="header-sub">AS5600 · PWM Brake · ESP32 · BLE</span>
+  <div class="spacer"></div>
+  <span class="pill" id="hz-pill" style="display:none"><span id="hz-val">–</span> Hz</span>
+  <span class="pill workout-pill" id="workout-pill" style="margin-left:6px"><span class="dot" id="workout-dot"></span><span id="workout-pill-text">No Workout</span></span>
+  <span class="pill" style="margin-left:6px"><span class="dot" id="status-dot"></span><span id="status-text">Disconnected</span></span>
+</div>
+<div class="secure-note">Web Bluetooth — open this file directly (file://) or via localhost in Chrome/Edge. Plain http:// over LAN is blocked.</div>
+
+<div class="tabs">
+  <button class="tab active" data-tab="live">Live</button>
+  <button class="tab" data-tab="about">About</button>
+</div>
+
+<!-- ─── LIVE TAB ────────────────────────────────────────────────────────── -->
+<div class="panel active" id="panel-live">
+
+  <div class="controls">
+    <button class="btn-green" id="btn-connect">Connect</button>
+    <button class="btn-red" id="btn-disconnect" disabled>Disconnect</button>
+    <button id="btn-reset" disabled>Reset</button>
+  </div>
+
+  <div class="esp-info" id="esp-info"></div>
+
+  <!-- ─── AUTO WORKOUT ──────────────────────────────────────────────────── -->
+  <div class="card" id="workout-card">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;flex-wrap:wrap;gap:8px">
+      <span class="card-title" style="margin:0">Auto Workout — resistance ramp</span>
+      <span class="workout-phase" id="workout-phase">Idle</span>
+    </div>
+    <div class="controls" style="margin-bottom:6px">
+      <button class="btn-amber" id="btn-workout-start" disabled>⚡ Start Workout</button>
+      <button class="btn-red" id="btn-workout-stop" disabled>■ End Workout &amp; Save CSV</button>
+      <span id="workout-timer" style="font-size:12px;color:var(--text3);font-family:var(--mono);margin-left:6px"></span>
+    </div>
+    <div class="workout-progress"><div class="workout-progress-bar" id="workout-ramp-bar"></div></div>
+    <div class="workout-info" id="workout-info">Holds at 10 % until your first pull, then ramps resistance 10 % → 100 % over 2 min and holds there. If your cadence drops below 60 rpm (avg of two 4 s windows) the load eases 10 % at a time until you recover. End the workout to download the CSV.</div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Brake Resistance</div>
+    <div class="slider-row">
+      <input type="range" id="resistance-slider" min="0" max="100" value="0" step="1" disabled>
+      <span class="slider-val"><span id="resistance-val">0</span>%</span>
+    </div>
+  </div>
+
+  <div class="dials">
+    <div class="dial-card"><canvas id="drumCanvas"  width="320" height="260"></canvas></div>
+    <div class="dial-card"><canvas id="powerGauge"  width="320" height="200"></canvas></div>
+    <div class="dial-card"><canvas id="rpmGauge"    width="320" height="200"></canvas></div>
+  </div>
+
+  <div class="total-row">
+    <div>
+      <div style="font-size:10px;text-transform:uppercase;letter-spacing:.07em;color:var(--text3);margin-bottom:2px">Cumulative Energy (since reset)</div>
+      <span class="total-main" id="v-energy">–</span><span class="total-unit" id="v-energy-unit"> J</span>
+    </div>
+  </div>
+
+  <div class="metrics">
+    <div class="metric"><div class="m-label"><span class="m-tag" style="background:var(--vel)"></span>Avg Velocity</div>
+      <div class="m-val" id="avg-vel">–</div><div class="m-unit">m/s</div></div>
+    <div class="metric"><div class="m-label"><span class="m-tag" style="background:var(--force)"></span>Avg Set Force</div>
+      <div class="m-val" id="avg-force">–</div><div class="m-unit">N</div></div>
+    <div class="metric"><div class="m-label"><span class="m-tag" style="background:var(--power)"></span>Avg Power</div>
+      <div class="m-val" id="avg-power">–</div><div class="m-unit">W</div></div>
+  </div>
+
+  <div class="card" id="chart-card">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+      <span class="card-title">Force · Velocity · Power over time</span>
+      <span style="font-size:11px;color:var(--text3)">last 600 samples</span>
+    </div>
+    <div class="chart-legend">
+      <span><i style="background:var(--force)"></i>Set Force (N)</span>
+      <span><i style="background:var(--vel)"></i>Velocity (m/s)</span>
+      <span><i style="background:var(--power)"></i>Power (W)</span>
+    </div>
+    <div class="chart-wrap"><canvas id="cardioChart"></canvas></div>
+  </div>
+
+  <div class="log" id="log"></div>
+</div>
+
+<!-- ─── ABOUT TAB ───────────────────────────────────────────────────────── -->
+<div class="panel" id="panel-about">
+  <div class="card">
+    <div class="card-title">BLE Protocol (Nordic UART)</div>
+    <p style="font-size:12px;color:var(--text2);line-height:1.8;font-family:var(--mono)">
+      Service: <span style="color:var(--text)">6e400001-…</span><br>
+      Data (esp→app): <span style="color:var(--text)">16-byte LE binary — u32 ms · f32 rpm · i32 pos · f32 resistance</span><br>
+      Status:  <span style="color:var(--text)">[STATUS] {json}</span> (text notify)<br>
+      Info:    <span style="color:var(--text)">[INFO] message</span> (text notify)<br>
+      USB Serial: <span style="color:var(--text)">ASCII mirror [&lt;ms&gt;ms] RPM:… POS:… R:…</span> (debug only)<br>
+      Commands (app→esp): <span style="color:var(--text)">R:&lt;nn&gt; · RESET · S · STOP</span>
+    </p>
+  </div>
+  <div class="card">
+    <div class="card-title">Physics</div>
+    <p style="font-size:12px;color:var(--text2);line-height:1.8">
+      Drum dia 250 mm + rope dia 38 mm → effective radius <strong>R_EFF = 0.144 m</strong>.<br>
+      velocity = rpm·2π/60·R_EFF &nbsp;·&nbsp; set_force = (resistance%/100)·MAX_FORCE_N &nbsp;·&nbsp; power = force·velocity &nbsp;·&nbsp; energy = ∫power·dt<br>
+      <strong>MAX_FORCE</strong> = 7.5 kgf ≈ 73.6 N (configurable — edit the constants at the top of the page script).<br>
+      <em>"Set Force"</em> is the commanded brake force, not a measured rope load (there is no force sensor on the rope).
+    </p>
+  </div>
+  <div class="card">
+    <div class="card-title">CSV format — Auto workout</div>
+    <p style="font-size:12px;color:var(--text2);line-height:1.8;font-family:var(--mono)">
+      time_s, position, velocity_ms, resistance_pct, power_W
+    </p>
+  </div>
+  <div class="card">
+    <div class="card-title">Auto workout logic</div>
+    <p style="font-size:12px;color:var(--text2);line-height:1.8">
+      Arm the workout, then start pulling the rope. Resistance holds at <strong>10 %</strong> until your
+      first pull, then ramps linearly to <strong>100 % over 2 min</strong> and holds there for the rest
+      of the workout. During the hold, cadence is averaged over rolling <strong>4 s</strong> windows: if it
+      stays below <strong>60 rpm</strong> for <strong>two</strong> consecutive windows the held load sheds
+      <strong>10 points</strong> (down to a 10 % floor) to let you get back up to speed, repeating until your
+      cadence recovers — once you're back over 60 rpm the load simply holds at its reduced level.
+      Every sample is logged; end the workout to auto-download the CSV.
+    </p>
+  </div>
+</div>
+
+<script>
+'use strict';
+
+// ════════════════════════════════════════════════════════════════════════════
+//  Config — BLE UUIDs + PHYSICS (EDIT HERE to recalibrate)
+// ════════════════════════════════════════════════════════════════════════════
+const SERVICE_UUID = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
+const TX_UUID      = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';  // notify (esp→app)
+const RX_UUID      = '6e400002-b5a3-f393-e0a9-e50e24dcca9e';  // write  (app→esp)
+
+// ---- PHYSICS ----
+const MAX_FORCE_KGF = 7.5;                     // configurable max rope force
+const GRAVITY       = 9.80665;
+const MAX_FORCE_N   = MAX_FORCE_KGF * GRAVITY; // ≈ 73.6 N
+const R_EFF_M       = 0.144;                   // drum_r 0.125 + rope_r 0.019
+
+// ---- DIALS ----
+const RPM_MAX   = 300;
+const POWER_MAX = 350;   // ~73.6 N × ~4.5 m/s (300 rpm @ R_EFF) ≈ 333 W ceiling
+
+// ---- CHART ----
+const CHART_MAX = 600;
+
+// ---- AUTO WORKOUT ----
+const WK_START_PCT   = 10;      // resistance at the first pull
+const WK_PEAK_PCT    = 100;     // resistance at the top of the ramp
+const WK_RAMP_MS     = 120000;  // 2 min ramp 10% → 100%
+const WK_PULL_VEL    = 0.15;    // m/s that counts as "started pulling the rope"
+const WK_TICK_MS     = 200;     // how often the ramp is advanced + the brake re-commanded
+
+// Adaptive load relief during the hold phase: if the user's cadence sags below
+// WK_MIN_RPM for two consecutive WK_VEL_WINDOW_MS windows, drop the held load by
+// WK_LOAD_STEP_PCT points to let them recover, repeating until cadence returns.
+const WK_MIN_RPM     = 60;      // cadence floor (rpm) the hold load tries to protect
+const WK_VEL_WINDOW_MS = 4000;  // averaging window for the cadence check
+const WK_LOW_WINDOWS = 2;       // consecutive sub-WK_MIN_RPM windows that trigger a drop
+const WK_LOAD_STEP_PCT = 10;    // percentage points shed per trigger
+const WK_MIN_HOLD_PCT  = WK_START_PCT;  // don't relieve the load below the ramp's start
+
+const $ = id => document.getElementById(id);
+
+// ════════════════════════════════════════════════════════════════════════════
+//  App state
+// ════════════════════════════════════════════════════════════════════════════
+let device = null, server = null, txChar = null, rxChar = null;
+let connected = false;
+let rxBuf = '';
+const textDecoder = new TextDecoder();
+const textEncoder = new TextEncoder();
+
+// Live values (drive the dials, always updated).
+let liveRpm = 0, livePower = 0;
+let liveCumCounts = 0;   // raw signed encoder counts from firmware
+
+// Incoming binary frames are queued here and drained once per animation frame
+// (decouples BLE arrival rate from render rate). Each entry: {ms, rpm, pos, r}.
+const PENDING_FRAMES = [];
+
+// Energy integration (drives the live cumulative-energy tile).
+let lastTs = null;                 // device ms of previous frame
+let energyJ = 0;
+let sumV = 0, sumF = 0, sumP = 0, nSamp = 0;
+
+// Auto-workout lifecycle. Phase: 'idle' | 'armed' | 'ramp' | 'hold'.
+// The workout owns the resistance while active — the slider is locked out.
+let workoutActive  = false;
+let workoutPhase   = 'idle';
+let workoutStartMs = 0;         // performance.now() when Start Workout was clicked
+let workoutPullMs  = 0;         // performance.now() of the first rope pull (ramp t0)
+let wkResistance   = 0;         // current commanded resistance (%) the workout is holding
+let wkLastSentPct  = -1;        // last integer % actually written to the firmware
+let wkTimerHandle  = null;      // drives the ramp on a wall-clock tick (independent of BLE frames)
+
+// Adaptive hold-phase load relief (see WK_MIN_RPM et al.).
+let wkHoldPct      = WK_PEAK_PCT;  // load the hold phase currently commands (drops on sag)
+let wkWinStartMs   = 0;         // device ms the current cadence window opened (0 = not open)
+let wkWinRpmSum    = 0;         // Σ|rpm| over the current window
+let wkWinSamples   = 0;         // sample count in the current window
+let wkLowWindows   = 0;         // consecutive completed windows below WK_MIN_RPM
+
+// Slider drag tracking — don't overwrite the slider while the user drags it.
+let sliderDragging = false;
+let lastSliderSendMs = 0;
+const SLIDER_THROTTLE_MS = 80;
+
+let sampleTimes = [];               // for Hz pill
+
+// ════════════════════════════════════════════════════════════════════════════
+//  Gauge dials — custom canvas semicircular arc gauges
+// ════════════════════════════════════════════════════════════════════════════
+function drawGauge(canvas, value, max, label, unit, color) {
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  const cx = W / 2, cy = H * 0.86, r = Math.min(W / 2, H * 0.78) - 16;
+  const start = Math.PI, end = 2 * Math.PI;       // 180° → 360° (upper semicircle)
+  const frac = Math.max(0, Math.min(1, value / max));
+
+  ctx.clearRect(0, 0, W, H);
+
+  // Background arc
+  ctx.lineWidth = 14;
+  ctx.lineCap = 'round';
+  ctx.strokeStyle = 'rgba(255,255,255,.07)';
+  ctx.beginPath(); ctx.arc(cx, cy, r, start, end); ctx.stroke();
+
+  // Value arc
+  ctx.strokeStyle = color;
+  ctx.shadowColor = color; ctx.shadowBlur = 10;
+  ctx.beginPath(); ctx.arc(cx, cy, r, start, start + (end - start) * frac); ctx.stroke();
+  ctx.shadowBlur = 0;
+
+  // Center value
+  ctx.fillStyle = '#e8e8ea';
+  ctx.textAlign = 'center';
+  ctx.font = '500 38px IBM Plex Mono, monospace';
+  ctx.fillText(Math.round(value), cx, cy - 6);
+
+  ctx.fillStyle = '#55555c';
+  ctx.font = '12px IBM Plex Mono, monospace';
+  ctx.fillText(unit, cx, cy + 14);
+
+  ctx.fillStyle = '#888890';
+  ctx.font = '500 12px IBM Plex Sans, sans-serif';
+  ctx.fillText(label, cx, cy + 34);
+
+  // Min / max ticks
+  ctx.fillStyle = '#55555c';
+  ctx.font = '10px IBM Plex Mono, monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('0',  cx - r, cy + 16);
+  ctx.fillText(String(max), cx + r, cy + 16);
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  Drum position dial — hero widget.
+//  The needle tracks the physical magnet 1:1.
+//    cumCounts  signed encoder ticks from reset  (4096 = one full CW rev)
+//    rpm        current RPM (sign = direction)
+// ════════════════════════════════════════════════════════════════════════════
+function drawDrum(canvas, cumCounts, rpm) {
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  const cx = W / 2, cy = H * 0.46;
+  const R  = Math.min(W / 2, H * 0.43) - 8;
+
+  ctx.clearRect(0, 0, W, H);
+
+  // ── Outer ring ────────────────────────────────────────────────────────────
+  ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2);
+  ctx.strokeStyle = 'rgba(255,255,255,.10)'; ctx.lineWidth = 1.5; ctx.stroke();
+
+  // ── Tick marks (36 major @ 10°, minor every 2°) ───────────────────────────
+  for (let i = 0; i < 180; i++) {
+    const major = i % 5 === 0;
+    const a     = (i / 180) * Math.PI * 2 - Math.PI / 2;
+    const len   = major ? 9 : 4;
+    const r0    = R - len;
+    ctx.beginPath();
+    ctx.moveTo(cx + r0 * Math.cos(a), cy + r0 * Math.sin(a));
+    ctx.lineTo(cx + R  * Math.cos(a), cy + R  * Math.sin(a));
+    ctx.strokeStyle = major ? 'rgba(255,255,255,.40)' : 'rgba(255,255,255,.12)';
+    ctx.lineWidth   = major ? 1.5 : 0.7;
+    ctx.stroke();
+  }
+
+  // ── Sub-revolution progress arc ───────────────────────────────────────────
+  // Fills from 12 o'clock clockwise to show how far into the current revolution
+  // the drum is. CW spin fills right; CCW spin fills left.
+  const COUNTS_PER_REV = 4096;
+  const totalAngleRad  = (cumCounts / COUNTS_PER_REV) * Math.PI * 2;
+  const subAngle       = ((totalAngleRad % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
+  const arcStart       = -Math.PI / 2;
+  if (subAngle > 0.01) {
+    ctx.beginPath();
+    ctx.arc(cx, cy, R - 6, arcStart, arcStart + subAngle);
+    ctx.strokeStyle = 'rgba(251,191,36,.22)';
+    ctx.lineWidth = 6; ctx.lineCap = 'butt'; ctx.stroke();
+    ctx.lineCap = 'round';
+  }
+
+  // ── Needle — tracks absolute magnet position ───────────────────────────────
+  const needleAngle = totalAngleRad - Math.PI / 2;
+  const nTip  = R - 10;
+  const nTail = -16;
+  const nW    = 3.5;
+
+  ctx.save();
+  ctx.translate(cx, cy); ctx.rotate(needleAngle);
+  ctx.beginPath();
+  ctx.moveTo(-nW / 2, nTail); ctx.lineTo(-nW / 2, nTip);
+  ctx.lineTo( nW / 2, nTip);  ctx.lineTo( nW / 2, nTail);
+  ctx.closePath();
+  ctx.fillStyle = '#60a5fa';
+  ctx.shadowColor = '#60a5fa'; ctx.shadowBlur = 10;
+  ctx.fill(); ctx.shadowBlur = 0;
+  ctx.restore();
+
+  // Glowing tip
+  const tipX = cx + nTip * Math.cos(needleAngle);
+  const tipY = cy + nTip * Math.sin(needleAngle);
+  ctx.beginPath(); ctx.arc(tipX, tipY, 4.5, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(96,165,250,.25)'; ctx.fill();
+
+  // ── Hub ───────────────────────────────────────────────────────────────────
+  ctx.beginPath(); ctx.arc(cx, cy, 6, 0, Math.PI * 2);
+  ctx.fillStyle = '#fbbf24';
+  ctx.shadowColor = '#fbbf24'; ctx.shadowBlur = 7;
+  ctx.fill(); ctx.shadowBlur = 0;
+
+  // ── Labels below the dial ─────────────────────────────────────────────────
+  const revs     = cumCounts / COUNTS_PER_REV;
+  const revsAbs  = Math.abs(revs);
+  const revsText = revsAbs >= 100 ? revsAbs.toFixed(0)
+                 : revsAbs >= 10  ? revsAbs.toFixed(1)
+                 :                  revsAbs.toFixed(2);
+
+  const yBase = cy + R + 18;
+  ctx.textAlign = 'center';
+
+  // Revolutions — large
+  ctx.fillStyle = '#e8e8ea';
+  ctx.font = '500 26px IBM Plex Mono, monospace';
+  ctx.fillText(revsText, cx, yBase);
+
+  ctx.fillStyle = '#55555c';
+  ctx.font = '11px IBM Plex Mono, monospace';
+  ctx.fillText('rev', cx, yBase + 17);
+
+  // Raw count — small, right-aligned inside label row
+  ctx.fillStyle = '#55555c';
+  ctx.font = '10px IBM Plex Mono, monospace';
+  ctx.textAlign = 'right';
+  ctx.fillText(cumCounts + ' cts', W - 8, yBase + 17);
+
+  // Direction arrow + RPM — left side
+  const dirArrow = rpm > 0.5 ? '↻' : rpm < -0.5 ? '↺' : '·';
+  ctx.textAlign = 'left';
+  ctx.fillStyle = Math.abs(rpm) > 0.5 ? '#60a5fa' : '#55555c';
+  ctx.font = '500 11px IBM Plex Sans, sans-serif';
+  ctx.fillText(`${dirArrow} ${Math.abs(rpm) > 0.5 ? Math.abs(rpm).toFixed(1) + ' rpm' : 'still'}`, 8, yBase + 17);
+
+  // Widget label
+  ctx.fillStyle = '#888890';
+  ctx.font = '500 11px IBM Plex Sans, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('DRUM POSITION', cx, yBase + 34);
+}
+
+function renderDials() {
+  drawDrum ($('drumCanvas'),  liveCumCounts, liveRpm);
+  drawGauge($('powerGauge'),  livePower, POWER_MAX, 'POWER', 'W',   '#4ade80');
+  drawGauge($('rpmGauge'),    Math.abs(liveRpm), RPM_MAX, 'SPEED', 'rpm', '#60a5fa');
+}
+
+renderDials();
+
+// ════════════════════════════════════════════════════════════════════════════
+//  Chart.js — Force / Velocity / Power over time (dual y-axis)
+// ════════════════════════════════════════════════════════════════════════════
+const chartLabels = [];
+const chartDatasets = [
+  { label: 'Set Force (N)', yAxisID: 'y',  borderColor: '#f87171', data: [], pointRadius: 0, borderWidth: 1.5, tension: .2 },
+  { label: 'Power (W)',     yAxisID: 'y',  borderColor: '#4ade80', data: [], pointRadius: 0, borderWidth: 1.5, tension: .2 },
+  { label: 'Velocity (m/s)',yAxisID: 'y1', borderColor: '#60a5fa', data: [], pointRadius: 0, borderWidth: 1.5, tension: .2 },
+];
+const cardioChart = new Chart($('cardioChart'), {
+  type: 'line',
+  data: { labels: chartLabels, datasets: chartDatasets },
+  options: {
+    animation: false, responsive: true, maintainAspectRatio: false,
+    scales: {
+      x:  { display: false },
+      y:  { position: 'left',
+            grid: { color: 'rgba(255,255,255,.05)' },
+            ticks: { color: '#55555c', font: { family: 'IBM Plex Mono', size: 10 } },
+            title: { display: true, text: 'N / W', color: '#55555c', font: { size: 10 } } },
+      y1: { position: 'right',
+            grid: { drawOnChartArea: false },
+            ticks: { color: '#60a5fa', font: { family: 'IBM Plex Mono', size: 10 } },
+            title: { display: true, text: 'm/s', color: '#60a5fa', font: { size: 10 } } },
+    },
+    plugins: { legend: { display: false } },
+  },
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+//  Frame processing — physics + session accumulation. Called from the rAF
+//  drain loop (below), once per queued frame, NOT per BLE notification.
+// ════════════════════════════════════════════════════════════════════════════
+function processFrame(deviceMs, rpm, pos, rPct) {
+  const omega    = Math.abs(rpm) * 2 * Math.PI / 60;
+  const velocity = omega * R_EFF_M;                 // m/s, always ≥ 0
+  const setForce = (rPct / 100) * MAX_FORCE_N;      // N (commanded)
+  const power    = setForce * velocity;             // W, always ≥ 0
+
+  // Live dials always reflect the latest sample (even after session ends).
+  liveRpm       = rpm;
+  livePower     = power;
+  liveCumCounts = pos;   // signed raw encoder counts — drum dial tracks this directly
+
+  // Auto workout: watch for the first rope pull so the ramp can start. The ramp
+  // itself is advanced on a wall-clock timer (tickWorkout), not here, so it keeps
+  // climbing smoothly regardless of frame timing. Records the workout CSV.
+  if (workoutActive) observeWorkoutFrame(deviceMs, velocity, power, pos);
+
+  // Reconcile the slider to the firmware's enforced resistance, unless the
+  // user is mid-drag. While a workout owns the brake, show the commanded value.
+  if (!sliderDragging) {
+    const showPct = workoutActive ? Math.round(wkResistance) : rPct;
+    $('resistance-slider').value = showPct;
+    $('resistance-val').textContent = showPct;
+  }
+
+  // Live chart + energy + running averages — updated continuously while connected.
+  if (lastTs != null) {
+    const dt = (deviceMs - lastTs) / 1000;
+    if (dt > 0 && dt < 1) energyJ += power * dt;
+  }
+  sumV += velocity; sumF += setForce; sumP += power; nSamp++;
+
+  chartLabels.push('');
+  chartDatasets[0].data.push(setForce);
+  chartDatasets[1].data.push(power);
+  chartDatasets[2].data.push(velocity);
+  if (chartLabels.length > CHART_MAX) {
+    chartLabels.shift();
+    chartDatasets.forEach(d => d.data.shift());
+  }
+  chartDirty = true;                                // redrawn by the throttled chart loop
+  lastTs = deviceMs;
+
+  // Hz pill — trailing 2 s window.
+  const now = Date.now();
+  sampleTimes.push(now);
+  while (sampleTimes.length && now - sampleTimes[0] >= 2000) sampleTimes.shift();
+  if (sampleTimes.length >= 2) {
+    $('hz-val').textContent = (sampleTimes.length / 2).toFixed(0);
+    $('hz-pill').style.display = '';
+  }
+}
+
+// ── rAF drain loop — drains all frames queued since the last tick, then
+// repaints the dials + session tiles once. Decouples BLE arrival from render.
+let chartDirty = false;
+(function rafLoop() {
+  requestAnimationFrame(rafLoop);
+  if (PENDING_FRAMES.length === 0) return;
+  while (PENDING_FRAMES.length > 0) {
+    const f = PENDING_FRAMES.shift();
+    processFrame(f.ms, f.rpm, f.pos, f.r);
+  }
+  renderDials();
+  updateSessionTiles();
+})();
+
+// ── Throttled Chart.js redraw — at most once per CHART_REDRAW_MS.
+const CHART_REDRAW_MS = 50;
+let chartLastDrawMs = 0;
+(function chartRafLoop() {
+  requestAnimationFrame(chartRafLoop);
+  if (!chartDirty) return;
+  const now = performance.now();
+  if (now - chartLastDrawMs < CHART_REDRAW_MS) return;
+  chartLastDrawMs = now;
+  chartDirty = false;
+  cardioChart.update('none');
+})();
+
+function updateSessionTiles() {
+  // Energy: J, switching to kJ above 1000 J.
+  if (energyJ >= 1000) {
+    setText('v-energy', (energyJ / 1000).toFixed(2));
+    setText('v-energy-unit', ' kJ');
+  } else {
+    setText('v-energy', Math.round(energyJ));
+    setText('v-energy-unit', ' J');
+  }
+  setText('avg-vel',   nSamp ? (sumV / nSamp).toFixed(2) : '–');
+  setText('avg-force', nSamp ? Math.round(sumF / nSamp) : '–');
+  setText('avg-power', nSamp ? Math.round(sumP / nSamp) : '–');
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  Reset
+// ════════════════════════════════════════════════════════════════════════════
+function resetAll() {
+  if (workoutActive && !confirm('A workout is active. Reset and discard it?')) return;
+  if (workoutActive) endWorkout(false);           // stop the workout without downloading
+  energyJ = 0; sumV = 0; sumF = 0; sumP = 0; nSamp = 0; lastTs = null;
+  liveRpm = 0; livePower = 0; liveCumCounts = 0;
+  PENDING_FRAMES.length = 0;
+  chartLabels.length = 0;
+  chartDatasets.forEach(d => { d.data.length = 0; });
+  cardioChart.update('none');
+  chartDirty = false;
+  setText('v-energy', '–'); setText('v-energy-unit', ' J');
+  setText('avg-vel', '–'); setText('avg-force', '–'); setText('avg-power', '–');
+  renderDials();
+  if (connected) writeCmd('RESET');             // zero the encoder cumulative position
+  setStatus(connected ? 'connected' : 'disconnected');
+  log('Reset — values, graph, and encoder zeroed');
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  Auto workout — resistance ramp
+//
+//  Phases:
+//    armed → waiting for the first rope pull (resistance held at WK_START_PCT)
+//    ramp  → linear WK_START_PCT → WK_PEAK_PCT over WK_RAMP_MS from first pull
+//    hold  → at WK_PEAK_PCT, stays there until the workout ends
+//
+//  The ramp is advanced on a wall-clock setInterval (tickWorkout) rather than off
+//  incoming BLE frames, so the commanded resistance climbs smoothly and visibly
+//  regardless of frame timing. Pull detection and CSV logging happen per frame
+//  (observeWorkoutFrame). CSV columns: time_s, position, velocity, resistance, power.
+// ════════════════════════════════════════════════════════════════════════════
+let workoutRows    = [];        // CSV rows: [time_s, position, velocity, resistance, power]
+let workoutRowT0Ms = 0;         // device ms of the first workout sample (time-column origin)
+
+function setWorkoutResistance(pct) {
+  wkResistance = Math.max(0, Math.min(100, pct));
+  const iv = Math.round(wkResistance);
+  if (iv !== wkLastSentPct) {
+    wkLastSentPct = iv;
+    if (connected) writeCmd('R:' + iv);
+  }
+  // Reflect the commanded value on the slider immediately (don't wait for a frame).
+  if (!sliderDragging) {
+    $('resistance-slider').value = iv;
+    $('resistance-val').textContent = iv;
+  }
+}
+
+function setWorkoutPhase(phase) {
+  workoutPhase = phase;
+  const el = $('workout-phase');
+  el.className = 'workout-phase' + (phase !== 'idle' ? ' ' + phase : '');
+  const labels = { idle: 'Idle', armed: 'Armed — pull to start',
+                   ramp: 'Ramping', hold: 'Hold — auto-easing' };
+  el.textContent = labels[phase] || phase;
+  updateWorkoutIndicator();
+}
+
+// Header indicator — always shows whether a workout is running and its phase.
+function updateWorkoutIndicator() {
+  const dot = $('workout-dot'), txt = $('workout-pill-text'), pill = $('workout-pill');
+  dot.className = 'dot' + (workoutActive ? ' ' + workoutPhase : '');
+  pill.classList.toggle('on', workoutActive);
+  const labels = { armed: 'Workout · armed', ramp: 'Workout · ramping', hold: 'Workout · hold' };
+  txt.textContent = workoutActive ? (labels[workoutPhase] || 'Workout') : 'No Workout';
+}
+
+// Per-frame: detect the first pull, and log CSV rows while active.
+function observeWorkoutFrame(deviceMs, velocity, power, pos) {
+  if (workoutPhase === 'armed' && velocity >= WK_PULL_VEL) {
+    workoutPullMs = performance.now();
+    setWorkoutPhase('ramp');
+    log('Rope pull detected — ramping resistance to 100 % over 2 min', 'ok');
+  }
+  // Once at peak, watch cadence and shed load if the user is bogging down.
+  if (workoutPhase === 'hold') monitorHoldCadence(deviceMs);
+  if (workoutRows.length === 0) workoutRowT0Ms = deviceMs;
+  const tSec = (deviceMs - workoutRowT0Ms) / 1000;
+  workoutRows.push([
+    tSec.toFixed(3),
+    pos,
+    velocity.toFixed(4),
+    Math.round(wkResistance),
+    power.toFixed(3),
+  ].join(','));
+}
+
+// Clear the cadence-window accumulators (called when the hold phase begins).
+function resetHoldCadence() {
+  wkWinStartMs = 0;
+  wkWinRpmSum  = 0;
+  wkWinSamples = 0;
+  wkLowWindows = 0;
+}
+
+// Hold-phase cadence watchdog. Averages |rpm| over WK_VEL_WINDOW_MS windows; after
+// WK_LOW_WINDOWS consecutive windows below WK_MIN_RPM it sheds WK_LOAD_STEP_PCT
+// points off the held load and rearms, repeating until cadence recovers. Once the
+// user gets back over WK_MIN_RPM the load simply holds at its reduced level.
+function monitorHoldCadence(deviceMs) {
+  if (wkWinStartMs === 0) wkWinStartMs = deviceMs;   // open the first window lazily
+  wkWinRpmSum += Math.abs(liveRpm);
+  wkWinSamples++;
+
+  if (deviceMs - wkWinStartMs < WK_VEL_WINDOW_MS) return;   // window still filling
+
+  const avgRpm = wkWinSamples ? wkWinRpmSum / wkWinSamples : 0;
+  // Start the next window fresh from this sample.
+  wkWinStartMs = deviceMs;
+  wkWinRpmSum  = 0;
+  wkWinSamples = 0;
+
+  if (avgRpm >= WK_MIN_RPM) { wkLowWindows = 0; return; }   // cadence fine — rearm
+
+  wkLowWindows++;
+  if (wkLowWindows < WK_LOW_WINDOWS) return;                // wait for the 2nd window
+  wkLowWindows = 0;                                         // require 2 fresh windows again
+
+  if (wkHoldPct <= WK_MIN_HOLD_PCT) {
+    log(`Cadence ${avgRpm.toFixed(0)} rpm < ${WK_MIN_RPM} — load already at floor ${WK_MIN_HOLD_PCT}%`, 'warn');
+    return;
+  }
+  wkHoldPct = Math.max(WK_MIN_HOLD_PCT, wkHoldPct - WK_LOAD_STEP_PCT);
+  setWorkoutResistance(wkHoldPct);
+  log(`Cadence ${avgRpm.toFixed(0)} rpm < ${WK_MIN_RPM} for ${WK_LOW_WINDOWS} windows — easing load to ${wkHoldPct}%`, 'warn');
+}
+
+// Wall-clock tick: drives the ramp + refreshes the UI (independent of BLE frames).
+function tickWorkout() {
+  if (!workoutActive) return;
+  if (workoutPhase === 'armed') {
+    setWorkoutResistance(WK_START_PCT);
+  } else if (workoutPhase === 'ramp') {
+    const t = performance.now() - workoutPullMs;
+    if (t >= WK_RAMP_MS) {
+      wkHoldPct = WK_PEAK_PCT;
+      resetHoldCadence();
+      setWorkoutResistance(wkHoldPct);
+      setWorkoutPhase('hold');
+      log('Ramp complete — holding at 100 %', 'ok');
+    } else {
+      const frac = t / WK_RAMP_MS;
+      setWorkoutResistance(WK_START_PCT + (WK_PEAK_PCT - WK_START_PCT) * frac);
+    }
+  } else if (workoutPhase === 'hold') {
+    // Command whatever the cadence watchdog has settled on (WK_PEAK_PCT or eased down).
+    setWorkoutResistance(wkHoldPct);
+  }
+  updateWorkoutUI();
+}
+
+// ── Workout lifecycle ────────────────────────────────────────────────────────
+function startWorkout() {
+  if (workoutActive) return;
+  if (!connected) { log('Connect before starting a workout', 'warn'); return; }
+  workoutActive  = true;
+  workoutStartMs = performance.now();
+  workoutPullMs  = 0;
+  workoutRows    = [];
+  workoutRowT0Ms = 0;
+  wkResistance   = WK_START_PCT;
+  wkLastSentPct  = -1;
+  wkHoldPct      = WK_PEAK_PCT;
+  resetHoldCadence();
+  setWorkoutPhase('armed');
+  setWorkoutResistance(WK_START_PCT);
+  updateWorkoutUI();
+  log('Workout armed — start pulling the rope to begin the ramp', 'ok');
+  wkTimerHandle = setInterval(tickWorkout, WK_TICK_MS);
+}
+
+// end the workout; download === true downloads the CSV, false just stops (Reset).
+function endWorkout(download) {
+  if (!workoutActive) return;
+  workoutActive = false;
+  clearInterval(wkTimerHandle); wkTimerHandle = null;
+  setWorkoutPhase('idle');
+  updateWorkoutIndicator();
+  $('workout-timer').textContent = '';
+  $('workout-ramp-bar').style.width = '0%';
+  // Release the brake to a safe resting resistance.
+  if (connected) writeCmd('R:0');
+  wkResistance = 0; wkLastSentPct = 0;
+  setStatus(connected ? 'connected' : 'disconnected');   // re-enable the slider
+
+  if (!download) return;
+  if (!workoutRows.length) {
+    log('Workout ended — no samples recorded, nothing saved', 'warn');
+    return;
+  }
+  const header = 'time_s,position,velocity_ms,resistance_pct,power_W\n';
+  const blob = new Blob([header + workoutRows.join('\n') + '\n'], { type: 'text/csv' });
+  const fname = 'workout_' + new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19) + '.csv';
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = fname;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  log(`Saved ${workoutRows.length} workout samples → ${fname}`, 'ok');
+}
+
+function stopWorkout() { endWorkout(true); }
+
+function updateWorkoutUI() {
+  // Elapsed timer (from Start Workout click).
+  const s  = Math.floor((performance.now() - workoutStartMs) / 1000);
+  const mm = String(Math.floor(s / 60)).padStart(2, '0');
+  const ss = String(s % 60).padStart(2, '0');
+  $('workout-timer').textContent = workoutActive ? `${mm}:${ss}` : '';
+  // Ramp progress bar.
+  let frac = 0;
+  if (workoutPhase === 'ramp' && workoutPullMs) {
+    frac = Math.min(1, (performance.now() - workoutPullMs) / WK_RAMP_MS);
+  } else if (workoutPhase === 'hold') {
+    frac = 1;
+  }
+  $('workout-ramp-bar').style.width = (frac * 100).toFixed(1) + '%';
+  updateWorkoutButtons();
+}
+
+function updateWorkoutButtons() {
+  $('btn-workout-start').disabled = !connected || workoutActive;
+  $('btn-workout-stop').disabled  = !workoutActive;
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  Web Bluetooth client
+// ════════════════════════════════════════════════════════════════════════════
+// Reject if a promise doesn't settle in time, so a stalled BLE step fails loudly
+// instead of hanging on "Connecting GATT…" forever.
+function withTimeout(promise, ms, label) {
+  let to;
+  const timeout = new Promise((_, rej) => {
+    to = setTimeout(() => rej(new Error(label + ' timed out after ' + (ms / 1000) + 's')), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(to));
+}
+
+async function connect() {
+  if (!navigator.bluetooth) { log('Web Bluetooth unavailable — use Chrome/Edge desktop', 'err'); return; }
+  try {
+    log('Requesting device…');
+    device = await navigator.bluetooth.requestDevice({
+      filters: [{ namePrefix: 'CardioDrum' }],
+      optionalServices: [SERVICE_UUID],
+    });
+    device.addEventListener('gattserverdisconnected', onDisconnect);
+
+    // If a stale GATT connection is lingering, drop it before reconnecting.
+    if (device.gatt.connected) { try { device.gatt.disconnect(); } catch (_) {} }
+
+    log('Connecting GATT…');
+    server = await withTimeout(device.gatt.connect(), 12000, 'GATT connect');
+    log('Discovering service…');
+    const service = await withTimeout(server.getPrimaryService(SERVICE_UUID), 8000, 'Service discovery');
+    log('Getting characteristics…');
+    txChar = await withTimeout(service.getCharacteristic(TX_UUID), 8000, 'TX characteristic');
+    rxChar = await withTimeout(service.getCharacteristic(RX_UUID), 8000, 'RX characteristic');
+    log('Starting notifications…');
+    await withTimeout(txChar.startNotifications(), 8000, 'startNotifications');
+    txChar.addEventListener('characteristicvaluechanged', onNotify);
+    connected = true;
+    rxBuf = '';
+    setStatus('connected');
+    log('Connected to ' + (device.name || 'CardioDrum'), 'ok');
+    await writeCmd('S');                          // ask for a status line
+  } catch (e) {
+    log('Connect failed: ' + e.message, 'err');
+    connected = false;
+    if (device && device.gatt && device.gatt.connected) { try { device.gatt.disconnect(); } catch (_) {} }
+    setStatus('disconnected');
+  }
+}
+
+function disconnect() {
+  if (device && device.gatt && device.gatt.connected) device.gatt.disconnect();
+  else onDisconnect();
+}
+
+function onDisconnect() {
+  connected = false;
+  txChar = null; rxChar = null; server = null;
+  rxBuf = ''; PENDING_FRAMES.length = 0;
+  if (workoutActive) { log('Disconnected mid-workout — ending & saving CSV', 'warn'); stopWorkout(); }
+  setStatus('disconnected');
+  log('Disconnected — click Connect to reconnect');
+}
+
+function onNotify(ev) {
+  const dv = ev.target.value;                       // DataView
+  // A data frame is exactly 16 bytes of binary. Text lines ([STATUS]/[INFO])
+  // are longer and start with the ASCII '[' byte (0x5B).
+  if (dv.byteLength === 16 && dv.getUint8(0) !== 0x5B) {
+    PENDING_FRAMES.push({
+      ms:  dv.getUint32 (0,  true),
+      rpm: dv.getFloat32(4,  true),
+      pos: dv.getInt32  (8,  true),
+      r:   Math.round(dv.getFloat32(12, true)),
+    });
+    return;
+  }
+  // Otherwise it's a text notification (status / info) — accumulate + split.
+  rxBuf += textDecoder.decode(dv);
+  let nl;
+  while ((nl = rxBuf.indexOf('\n')) >= 0) {
+    const line = rxBuf.slice(0, nl).trim();
+    rxBuf = rxBuf.slice(nl + 1);
+    if (line) handleLine(line);
+  }
+}
+
+async function writeCmd(cmd) {
+  if (!rxChar) { log('Not connected', 'warn'); return; }
+  const data = textEncoder.encode(cmd + '\n');
+  try {
+    if (rxChar.writeValueWithoutResponse) await rxChar.writeValueWithoutResponse(data);
+    else await rxChar.writeValue(data);
+    log('→ ' + cmd);
+  } catch (e) {
+    log('Write failed: ' + e.message, 'err');
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  Text dispatcher — [STATUS] / [INFO]  (data frames are binary, see onNotify)
+// ════════════════════════════════════════════════════════════════════════════
+function handleLine(line) {
+  if (line.startsWith('[STATUS]')) {
+    try { handleStatus(JSON.parse(line.slice(8).trim())); }
+    catch (e) { log('Bad STATUS JSON', 'err'); }
+    return;
+  }
+  if (line.startsWith('[INFO]')) { log(line.slice(6).trim()); return; }
+  log(line);
+}
+
+function handleStatus(s) {
+  if (!s) return;
+  const parts = [];
+  if (s.name) parts.push(s.name);
+  if (s.fw)   parts.push('fw ' + s.fw);
+  if (s.heap) parts.push('heap ' + Math.round(s.heap / 1024) + 'KB');
+  $('esp-info').textContent = parts.join(' · ');
+  if (typeof s.r === 'number' && !sliderDragging && !workoutActive) {
+    $('resistance-slider').value = s.r;
+    $('resistance-val').textContent = s.r;
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  UI helpers
+// ════════════════════════════════════════════════════════════════════════════
+function setText(id, v) { const el = $(id); if (el) el.textContent = v; }
+
+function setStatus(state) {
+  const dot = $('status-dot'), txt = $('status-text');
+  dot.className = 'dot';
+  if (state === 'connected') {
+    dot.classList.add('on'); txt.textContent = 'Connected';
+    $('btn-connect').disabled       = true;
+    $('btn-disconnect').disabled    = false;
+    $('btn-reset').disabled         = false;
+    $('resistance-slider').disabled = workoutActive;   // workout owns the brake
+  } else {
+    txt.textContent = 'Disconnected';
+    $('btn-connect').disabled       = false;
+    $('btn-disconnect').disabled    = true;
+    $('btn-reset').disabled         = true;
+    $('resistance-slider').disabled = true;
+    $('hz-pill').style.display = 'none';
+    $('esp-info').textContent = '';
+    sampleTimes.length = 0;
+  }
+  updateWorkoutButtons();
+}
+
+function log(msg, cls = '') {
+  const el = $('log');
+  const d = document.createElement('div');
+  d.className = 'log-line' + (cls ? ' log-' + cls : '');
+  d.textContent = new Date().toLocaleTimeString('en', { hour12: false }) + '  ' + msg;
+  el.appendChild(d); el.scrollTop = el.scrollHeight;
+  while (el.children.length > 300) el.removeChild(el.firstChild);
+}
+
+function switchTab(id) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === id));
+  document.querySelectorAll('.panel').forEach(p => p.classList.toggle('active', p.id === 'panel-' + id));
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  Event wiring
+// ════════════════════════════════════════════════════════════════════════════
+$('btn-connect').addEventListener('click', connect);
+$('btn-disconnect').addEventListener('click', disconnect);
+$('btn-workout-start').addEventListener('click', startWorkout);
+$('btn-workout-stop').addEventListener('click', stopWorkout);
+$('btn-reset').addEventListener('click', resetAll);
+
+const slider = $('resistance-slider');
+slider.addEventListener('input', () => {
+  const v = parseInt(slider.value, 10);
+  $('resistance-val').textContent = v;
+  sliderDragging = true;
+  const now = performance.now();
+  if (now - lastSliderSendMs >= SLIDER_THROTTLE_MS) {
+    lastSliderSendMs = now;
+    writeCmd('R:' + v);
+  }
+});
+function sliderRelease() {
+  if (!sliderDragging) return;
+  sliderDragging = false;
+  writeCmd('R:' + parseInt(slider.value, 10));   // final authoritative value
+}
+slider.addEventListener('change', sliderRelease);
+slider.addEventListener('pointerup', sliderRelease);
+slider.addEventListener('pointercancel', sliderRelease);
+
+document.querySelectorAll('.tab').forEach(t => {
+  t.addEventListener('click', () => switchTab(t.dataset.tab));
+});
+
+// Initial UI state
+setStatus('disconnected');
+updateWorkoutIndicator();
+</script>
+</body>
+</html>
