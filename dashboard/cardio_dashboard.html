@@ -833,9 +833,20 @@ function resetAll() {
   setText('v-energy', '–'); setText('v-energy-unit', ' J');
   setText('avg-vel', '–'); setText('avg-force', '–'); setText('avg-power', '–');
   renderDials();
-  if (connected) writeCmd('RESET');             // zero the encoder cumulative position
+  // Release the brake too. Reset claims to zero everything, but without this the
+  // firmware keeps braking at whatever the slider last commanded while the whole
+  // UI reads zero — and because uiCommandedPct still held that value, the next
+  // reconnect would silently re-apply it.
+  uiCommandedPct = 0;
+  wkLastSentPct  = -1;                          // nothing is authoritative any more
+  $('resistance-slider').value = 0;
+  $('resistance-val').textContent = '0';
+  if (connected) {
+    writeCmd('R:0');                            // release the brake
+    writeCmd('RESET');                          // zero the encoder cumulative position
+  }
   setStatus(connected ? 'connected' : (reconnecting ? 'reconnecting' : 'disconnected'));
-  log('Reset — values, graph, and encoder zeroed');
+  log('Reset — values, graph, brake, and encoder zeroed');
 }
 
 // ════════════════════════════════════════════════════════════════════════════

@@ -94,7 +94,9 @@ static volatile uint32_t lastPeerMs = 0;
 // Advertising state. advertising==false while a central is connected. The
 // re-assert timer re-kicks advertising periodically while unconnected, so a
 // silently-failed startAdvertising() can never leave the device invisible.
-static bool     advertising      = false;
+// (There is deliberately no `advertising` flag. One existed but was written and
+// never read: the stack gives no reliable "am I still advertising" query, so the
+// self-heal below re-kicks advertising on a timer instead of trying to detect it.)
 static uint32_t advReassertMs    = 0;
 // Settle-window latch for the connection-parameter re-request. File scope so the
 // connect edge in loop() can reset it per connection (see SEV 7 note there).
@@ -140,8 +142,16 @@ static int16_t pushAngle(uint16_t raw) {
 // Sliding-window slope over the last RPM_WINDOW_MS of (time, cumCounts) pairs.
 struct PosSnapshot { uint32_t us; int32_t counts; };
 static PosSnapshot posRing[RPM_RING_SIZE];
-static uint8_t     posRingHead = 0;
+// MUST be wide enough for RPM_RING_SIZE. These were uint8_t while the ring is
+// 350 entries: the head wrapped at 256, so slots 256..349 were never written,
+// posRingFull was set after 256 ticks instead of 350, and `uint8_t entries =
+// RPM_RING_SIZE` truncated 350 to 94 — collapsing the RPM slope window from the
+// intended 300 ms to ~94 ms and making RPM about three times noisier than the
+// configuration says. A static_assert below keeps this honest if the size grows.
+static uint16_t    posRingHead = 0;
 static bool        posRingFull = false;
+static_assert(RPM_RING_SIZE <= UINT16_MAX,
+              "posRingHead/entries types must be widened for this RPM_RING_SIZE");
 
 static uint32_t lastPushMs = 0;
 
@@ -183,20 +193,20 @@ static float computeRPM(uint32_t nowUs) {
     posRingHead = (posRingHead + 1) % RPM_RING_SIZE;
     if (posRingHead == 0) posRingFull = true;
 
-    uint8_t entries = posRingFull ? RPM_RING_SIZE : posRingHead;
+    uint16_t entries = posRingFull ? RPM_RING_SIZE : posRingHead;
     if (entries < 2) return 0.0f;
 
     // The ring is a circular buffer; oldest entry index:
-    uint8_t oldestIdx = posRingFull
+    uint16_t oldestIdx = posRingFull
         ? posRingHead                                     // head just wrapped
         : 0;
 
     // Walk forward from oldest to find the youngest entry still >= windowUs old.
     // That gives the longest window ≤ RPM_WINDOW_MS we can actually form.
     uint32_t windowUs = RPM_WINDOW_MS * 1000UL;
-    uint8_t  refIdx   = oldestIdx;
-    for (uint8_t i = 0; i < entries - 1; i++) {
-        uint8_t idx = (oldestIdx + i) % RPM_RING_SIZE;
+    uint16_t refIdx   = oldestIdx;
+    for (uint16_t i = 0; i + 1 < entries; i++) {   // i+1<entries: no underflow if entries==0
+        uint16_t idx = (oldestIdx + i) % RPM_RING_SIZE;
         if (nowUs - posRing[idx].us >= windowUs) refIdx = idx;
         else break;   // entries are time-ordered; once inside window we're done
     }
@@ -274,7 +284,11 @@ static void recoverI2C() {
 static void sendLine(const char *s) {
     serialLine(s);                      // drop-don't-block: never stall the BLE task
     if (deviceConnected && pTxChar) {
-        char buf[160];
+        // MUST hold the biggest line sendStatus() can build (~155 bytes) plus
+        // the newline and NUL. At 160 this had 3 bytes of headroom: one more
+        // [STATUS] field and the JSON would be silently truncated mid-object,
+        // which the dashboard surfaces only as "Bad STATUS JSON".
+        char buf[256];
         int n = snprintf(buf, sizeof(buf), "%s\n", s);
         if (n < 0) return;
         if (n >= (int)sizeof(buf)) n = sizeof(buf) - 1;
@@ -377,11 +391,14 @@ class RxCallback : public BLECharacteristicCallbacks {
                 if (rxBuf.length() > 64) rxBuf = "";   // guard runaway input
             }
         }
-        // Tolerate a final line with no trailing newline.
-        if (rxBuf.length() > 0) {
-            handleCommand(rxBuf);
-            rxBuf = "";
-        }
+        // NOTE: deliberately NO "flush the remainder" here. Dispatching whatever
+        // is left over at the end of a write defeats the buffering entirely: a
+        // command split across two BLE writes ("R:4", then "5" plus a newline —
+        // what a fragmented write on a marginal link looks like) would execute as
+        // handleCommand("R:4"), silently setting 4 % instead of 45 %. The
+        // remainder stays in rxBuf and is completed by the next write. Every
+        // command this firmware accepts is newline-terminated by the dashboard
+        // (writeCmd appends a newline), so nothing is lost by waiting for it.
     }
 };
 
@@ -392,12 +409,13 @@ class ServerCallbacks : public BLEServerCallbacks {
     // request can be repeated from loop() if the central renegotiates.
     void onConnect(BLEServer *pSrv, esp_ble_gatts_cb_param_t *param) override {
         deviceConnected = true;
-        connectCount++;
+        // Explicit load/store rather than ++: `++` on a volatile is deprecated
+        // (the RMW is not atomic). Single writer — this callback — so this is safe.
+        connectCount = connectCount + 1;
         memcpy(peerAddr, param->connect.remote_bda, sizeof(esp_bd_addr_t));
         peerConnId    = param->connect.conn_id;
         peerAddrValid = true;
         lastPeerMs    = millis();
-        advertising   = false;
 
         // Ask the central for a link tuned for reliability over power:
         //   ~30-50 ms interval (comfortably faster than the 40 ms frame push),
@@ -423,7 +441,7 @@ class ServerCallbacks : public BLEServerCallbacks {
     // 0x16 local host terminated, 0x3E failed to establish.
     void onDisconnect(BLEServer *, esp_ble_gatts_cb_param_t *param) override {
         deviceConnected = false;
-        disconnectCount++;
+        disconnectCount = disconnectCount + 1;   // see note in onConnect re: volatile ++
         lastDiscReason  = param ? param->disconnect.reason : 0;
         peerAddrValid   = false;
         pendingConnParams = false;
@@ -444,7 +462,6 @@ class ServerCallbacks : public BLEServerCallbacks {
 static void startAdvertisingNow() {
     if (!pServer) return;
     pServer->startAdvertising();
-    advertising   = true;
     advReassertMs = millis();
 }
 
