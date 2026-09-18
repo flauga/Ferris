@@ -47,6 +47,7 @@ body { max-width: 1400px; margin: 0 auto; padding: 20px 24px 60px; }
 .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text3); flex-shrink: 0; }
 .dot.on  { background: var(--green); box-shadow: 0 0 6px var(--green); }
 .dot.rec { background: var(--red);   animation: blink 1s infinite; }
+.dot.reconnecting { background: var(--amber); box-shadow: 0 0 6px var(--amber); animation: blink 1s infinite; }
 @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.25} }
 .secure-note { font-size: 11px; color: var(--text3); font-family: var(--mono); margin-bottom: 16px; }
 
@@ -116,15 +117,13 @@ input[type=range]:disabled { opacity: .4; }
 /* Auto workout */
 .workout-phase { font-size: 11px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase;
   padding: 3px 10px; border-radius: 20px; background: var(--bg3); border: 1px solid var(--border); color: var(--text2); }
-.workout-phase.armed { color: var(--blue);  border-color: rgba(96,165,250,.35);  background: var(--blue-bg); }
-.workout-phase.ramp  { color: var(--amber); border-color: rgba(251,191,36,.35);  background: var(--amber-bg); }
-.workout-phase.hold  { color: var(--green); border-color: rgba(74,222,128,.35);  background: var(--green-bg); }
+.workout-phase.armed    { color: var(--blue);  border-color: rgba(96,165,250,.35);  background: var(--blue-bg); }
+.workout-phase.adaptive { color: var(--green); border-color: rgba(74,222,128,.35);  background: var(--green-bg); }
 
 /* Header workout indicator */
-.workout-pill.on   { color: var(--amber); border-color: rgba(251,191,36,.35); background: var(--amber-bg); }
-#workout-dot.armed { background: var(--blue);  box-shadow: 0 0 6px var(--blue); }
-#workout-dot.ramp  { background: var(--amber); box-shadow: 0 0 6px var(--amber); animation: blink 1s infinite; }
-#workout-dot.hold  { background: var(--green); box-shadow: 0 0 6px var(--green); }
+.workout-pill.on      { color: var(--amber); border-color: rgba(251,191,36,.35); background: var(--amber-bg); }
+#workout-dot.armed    { background: var(--blue);  box-shadow: 0 0 6px var(--blue); }
+#workout-dot.adaptive { background: var(--green); box-shadow: 0 0 6px var(--green); }
 .workout-progress { height: 6px; border-radius: 3px; background: var(--bg4); overflow: hidden; margin: 4px 0 8px; }
 .workout-progress-bar { height: 100%; width: 0%; border-radius: 3px; background: var(--amber);
   box-shadow: 0 0 6px rgba(251,191,36,.5); transition: width .2s linear; }
@@ -160,6 +159,7 @@ input[type=range]:disabled { opacity: .4; }
 
   <div class="controls">
     <button class="btn-green" id="btn-connect">Connect</button>
+    <button id="btn-reconnect" style="display:none">↻ Reconnect now</button>
     <button class="btn-red" id="btn-disconnect" disabled>Disconnect</button>
     <button id="btn-reset" disabled>Reset</button>
   </div>
@@ -169,7 +169,7 @@ input[type=range]:disabled { opacity: .4; }
   <!-- ─── AUTO WORKOUT ──────────────────────────────────────────────────── -->
   <div class="card" id="workout-card">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;flex-wrap:wrap;gap:8px">
-      <span class="card-title" style="margin:0">Auto Workout — resistance ramp</span>
+      <span class="card-title" style="margin:0">Auto Workout — cadence-adaptive load</span>
       <span class="workout-phase" id="workout-phase">Idle</span>
     </div>
     <div class="controls" style="margin-bottom:6px">
@@ -177,8 +177,8 @@ input[type=range]:disabled { opacity: .4; }
       <button class="btn-red" id="btn-workout-stop" disabled>■ End Workout &amp; Save CSV</button>
       <span id="workout-timer" style="font-size:12px;color:var(--text3);font-family:var(--mono);margin-left:6px"></span>
     </div>
-    <div class="workout-progress"><div class="workout-progress-bar" id="workout-ramp-bar"></div></div>
-    <div class="workout-info" id="workout-info">Holds at 10 % until your first pull, then ramps resistance 10 % → 100 % over 2 min and holds there. If your cadence drops below 60 rpm (avg of two 4 s windows) the load eases 10 % at a time until you recover. End the workout to download the CSV.</div>
+    <div class="workout-progress"><div class="workout-progress-bar" id="workout-load-bar"></div></div>
+    <div class="workout-info" id="workout-info">Holds at 10 % until your first pull, then the load continuously adapts to your cadence (averaged over a 3 s window): below 60 rpm it decreases rapidly, between 60–80 rpm it increases slowly, and above 80 rpm it increases rapidly — clamped to a 10 % floor and 100 % ceiling. The bar above shows the current load. End the workout to download the CSV.</div>
   </div>
 
   <div class="card">
@@ -193,6 +193,19 @@ input[type=range]:disabled { opacity: .4; }
     <div class="dial-card"><canvas id="drumCanvas"  width="320" height="260"></canvas></div>
     <div class="dial-card"><canvas id="powerGauge"  width="320" height="200"></canvas></div>
     <div class="dial-card"><canvas id="rpmGauge"    width="320" height="200"></canvas></div>
+  </div>
+
+  <div class="card" id="cadence-card">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+      <span class="card-title">Cadence — keep your RPM in the target band</span>
+      <span id="cadence-now" style="font-size:12px;color:var(--text3);font-family:var(--mono)">– rpm</span>
+    </div>
+    <div class="chart-legend">
+      <span><i style="background:var(--blue)"></i>Upper (<span id="cad-high">80</span> rpm)</span>
+      <span><i style="background:var(--green)"></i>Your RPM <span id="cad-avg-lbl"></span></span>
+      <span><i style="background:var(--red)"></i>Lower (<span id="cad-low">60</span> rpm)</span>
+    </div>
+    <div class="chart-wrap" style="height:340px"><canvas id="cadenceChart"></canvas></div>
   </div>
 
   <div class="total-row">
@@ -259,12 +272,14 @@ input[type=range]:disabled { opacity: .4; }
     <div class="card-title">Auto workout logic</div>
     <p style="font-size:12px;color:var(--text2);line-height:1.8">
       Arm the workout, then start pulling the rope. Resistance holds at <strong>10 %</strong> until your
-      first pull, then ramps linearly to <strong>100 % over 2 min</strong> and holds there for the rest
-      of the workout. During the hold, cadence is averaged over rolling <strong>4 s</strong> windows: if it
-      stays below <strong>60 rpm</strong> for <strong>two</strong> consecutive windows the held load sheds
-      <strong>10 points</strong> (down to a 10 % floor) to let you get back up to speed, repeating until your
-      cadence recovers — once you're back over 60 rpm the load simply holds at its reduced level.
-      Every sample is logged; end the workout to auto-download the CSV.
+      first pull, after which the load <strong>continuously adapts to your cadence</strong>, averaged over a
+      single rolling <strong>3 s</strong> window: below <strong>60 rpm</strong> the load
+      <strong>decreases rapidly</strong>, between <strong>60–80 rpm</strong> it <strong>increases slowly</strong>,
+      and above <strong>80 rpm</strong> it <strong>increases rapidly</strong> — always clamped to a 10 % floor
+      and 100 % ceiling. There is no fixed time-based ramp: how fast the load climbs is entirely driven by how
+      fast you pedal. The rapid rate is ~0.75 %/s (the slow rate is gentler). All thresholds, the window
+      length, and both rates are editable constants at the top of the page script. Every sample is logged;
+      end the workout to auto-download the CSV.
     </p>
   </div>
 </div>
@@ -293,20 +308,56 @@ const POWER_MAX = 350;   // ~73.6 N × ~4.5 m/s (300 rpm @ R_EFF) ≈ 333 W ceil
 const CHART_MAX = 600;
 
 // ---- AUTO WORKOUT ----
-const WK_START_PCT   = 10;      // resistance at the first pull
-const WK_PEAK_PCT    = 100;     // resistance at the top of the ramp
-const WK_RAMP_MS     = 120000;  // 2 min ramp 10% → 100%
+const WK_START_PCT   = 10;      // resistance held before the first pull, and the load floor
+const WK_PEAK_PCT    = 100;     // load ceiling
 const WK_PULL_VEL    = 0.15;    // m/s that counts as "started pulling the rope"
-const WK_TICK_MS     = 200;     // how often the ramp is advanced + the brake re-commanded
+const WK_TICK_MS     = 200;     // how often the load is recomputed + the brake re-commanded
 
-// Adaptive load relief during the hold phase: if the user's cadence sags below
-// WK_MIN_RPM for two consecutive WK_VEL_WINDOW_MS windows, drop the held load by
-// WK_LOAD_STEP_PCT points to let them recover, repeating until cadence returns.
-const WK_MIN_RPM     = 60;      // cadence floor (rpm) the hold load tries to protect
-const WK_VEL_WINDOW_MS = 4000;  // averaging window for the cadence check
-const WK_LOW_WINDOWS = 2;       // consecutive sub-WK_MIN_RPM windows that trigger a drop
-const WK_LOAD_STEP_PCT = 10;    // percentage points shed per trigger
-const WK_MIN_HOLD_PCT  = WK_START_PCT;  // don't relieve the load below the ramp's start
+// Cadence-adaptive load control (all editable). There is NO fixed time-based ramp:
+// once you start pulling, the load moves entirely according to your cadence, averaged
+// over ONE rolling window of WK_HOLD_WINDOW_MS. The band sets the rate (resistance-%/s):
+//     avg < WK_RPM_LOW                  → decrease rapidly   (−WK_RATE_RAPID)
+//     WK_RPM_LOW ≤ avg ≤ WK_RPM_HIGH    → increase slowly    (+WK_RATE_SLOW)
+//     avg > WK_RPM_HIGH                 → increase rapidly   (+WK_RATE_RAPID)
+// The load is clamped to [WK_MIN_HOLD_PCT, WK_PEAK_PCT] and re-commanded every tick,
+// so it moves smoothly at the active rate rather than in visible steps.
+const WK_RPM_LOW        = 60;    // lower cadence threshold (rpm)
+const WK_RPM_HIGH       = 80;    // upper cadence threshold (rpm)
+const WK_HOLD_WINDOW_MS = 3000;  // single averaging window for the cadence check
+// "Rapid" defaults to the old ramp rate (10 %→100 % over 2 min ≈ 0.75 %/s).
+const WK_RATE_RAPID     = (WK_PEAK_PCT - WK_START_PCT) / 90;  // %/s — 0.75; edit freely
+const WK_RATE_SLOW      = 0.5;  // %/s — gentle increase while inside the target band
+const WK_MIN_HOLD_PCT   = WK_START_PCT;  // never drop the load below the floor
+
+// ---- CADENCE FEEDBACK GRAPH ----
+const CAD_MAX_POINTS = 120;      // scrolling window length (points on screen)
+const CAD_PERIOD_MS  = 300;      // how often a point is added (scroll speed)
+const CAD_Y_HEADROOM = 40;       // rpm shown above the upper threshold on the y-axis
+const CAD_AVG_MS     = 3000;     // rolling-average window (ms) for the plotted green RPM dot
+
+// ---- CONNECTION RELIABILITY ----
+// The firmware streams frames at 25 Hz (SAMPLE_PERIOD_MS = 40 ms) and re-advertises
+// ~500 ms after it detects a disconnect (its own supervision timeout is ~4 s). These
+// values give the ESP time to get back into advertising before we retry.
+// The firmware re-advertises ~300 ms after it sees a drop, at a 20-40 ms
+// advertising interval, so it is discoverable again almost immediately. The
+// first retry is therefore FAST (600 ms) — the old 3 s floor meant every drop
+// cost at least three seconds even when the device was already back. Backoff is
+// exponential from there, capped at 8 s.
+const RECONNECT_BASE_DELAY_MS = 600;    // wait before the 1st auto-reconnect attempt
+const RECONNECT_MAX_DELAY_MS  = 8000;   // backoff ceiling
+// Retry for ~5 minutes rather than a fixed small count, so stepping out of range
+// for a while (or the laptop briefly sleeping) doesn't permanently end a session.
+const RECONNECT_MAX_ATTEMPTS  = 60;
+// A drop mid-workout only ends the workout after this much continuous downtime.
+// Below it the workout stays paused and resumes intact.
+const RECONNECT_GIVEUP_MS     = 300000; // 5 min
+const WATCHDOG_TIMEOUT_MS     = 2500;   // no frame for this long while "connected" = dead link
+const WATCHDOG_CHECK_MS       = 500;    // how often the watchdog checks
+// Keep-alive cadence. Must stay well under the firmware's BLE_PEER_TIMEOUT_MS
+// (15 s), which releases the brake if the dashboard goes quiet.
+const KEEPALIVE_MS            = 3000;   // silent upstream ping cadence (keeps the OS radio awake)
+const PENDING_FRAMES_MAX      = 300;    // cap the drain queue (~12 s @ 25 Hz) so a backgrounded tab can't balloon it
 
 const $ = id => document.getElementById(id);
 
@@ -332,29 +383,64 @@ let lastTs = null;                 // device ms of previous frame
 let energyJ = 0;
 let sumV = 0, sumF = 0, sumP = 0, nSamp = 0;
 
-// Auto-workout lifecycle. Phase: 'idle' | 'armed' | 'ramp' | 'hold'.
+// Auto-workout lifecycle. Phase: 'idle' | 'armed' | 'adaptive'.
 // The workout owns the resistance while active — the slider is locked out.
 let workoutActive  = false;
 let workoutPhase   = 'idle';
 let workoutStartMs = 0;         // performance.now() when Start Workout was clicked
-let workoutPullMs  = 0;         // performance.now() of the first rope pull (ramp t0)
+let workoutPullMs  = 0;         // performance.now() of the first rope pull (start of adaptation)
 let wkResistance   = 0;         // current commanded resistance (%) the workout is holding
 let wkLastSentPct  = -1;        // last integer % actually written to the firmware
-let wkTimerHandle  = null;      // drives the ramp on a wall-clock tick (independent of BLE frames)
+let wkTimerHandle  = null;      // drives the load loop on a wall-clock tick (independent of BLE frames)
 
-// Adaptive hold-phase load relief (see WK_MIN_RPM et al.).
-let wkHoldPct      = WK_PEAK_PCT;  // load the hold phase currently commands (drops on sag)
+// Cadence-adaptive load control (see WK_RPM_LOW / WK_RPM_HIGH / WK_RATE_*).
+let wkHoldPct      = WK_START_PCT; // load the workout currently commands (starts at the floor)
 let wkWinStartMs   = 0;         // device ms the current cadence window opened (0 = not open)
 let wkWinRpmSum    = 0;         // Σ|rpm| over the current window
 let wkWinSamples   = 0;         // sample count in the current window
-let wkLowWindows   = 0;         // consecutive completed windows below WK_MIN_RPM
+let wkZoneRate     = 0;         // signed %/s currently applied to the held load (+inc / −dec)
+let wkWinAvgRpm    = 0;         // last completed window's average |rpm| (for logging/feedback)
 
 // Slider drag tracking — don't overwrite the slider while the user drags it.
 let sliderDragging = false;
+// ---- Authoritative commanded resistance ------------------------------------
+// THE single source of truth for "what load did we ask the firmware for".
+// Written ONLY by deliberate commands: user slider input and the workout
+// controller. NEVER written from incoming telemetry — the slider DOM is a
+// display mirror and gets overwritten by every frame, so reading the load back
+// out of it loses the command as soon as the firmware starts reporting 0 (which
+// it does the moment it releases the brake on a drop).
+let uiCommandedPct = 0;
+// Set when a link loss is observed, cleared once the load has been pushed back
+// to the firmware. Survives the `reconnecting` early-return in onDisconnect(),
+// which is what made the workout re-assert get skipped entirely.
+let needsResistanceReassert = false;
 let lastSliderSendMs = 0;
 const SLIDER_THROTTLE_MS = 80;
 
 let sampleTimes = [];               // for Hz pill
+
+// ---- Connection reliability state ----
+let userInitiatedDisconnect = false;  // true = a deliberate Disconnect click (no auto-reconnect)
+let reconnecting     = false;         // an auto-reconnect cycle is in progress
+let reconnectAttempts = 0;
+let reconnectStartMs = 0;             // performance.now() when the current recovery cycle began
+let reconnectTimer   = null;          // pending backoff timer
+let lastFrameMs      = 0;             // performance.now() of the last notification (watchdog input)
+let watchdogTimer    = null;
+let keepAliveTimer   = null;
+let wakeLock         = null;          // Screen Wake Lock sentinel (keeps the radio from idling)
+// True while establishGatt() is mid-flight. Web Bluetooth has no way to cancel a
+// connect in progress, so two overlapping bring-ups would race over the shared
+// server/txChar/rxChar globals and leave whichever finished LAST owning them —
+// with the loser's notification subscription still live. Every entry point into
+// a connection attempt goes through this guard.
+let gattBusy         = false;
+
+// Workout pause/resume across a recoverable drop (freezes the ramp wall-clock).
+let workoutPaused       = false;
+let workoutPauseStart   = 0;          // performance.now() when the pause began
+let workoutPausedTotalMs = 0;         // total paused time to subtract from ramp/elapsed clocks
 
 // ════════════════════════════════════════════════════════════════════════════
 //  Gauge dials — custom canvas semicircular arc gauges
@@ -555,6 +641,86 @@ const cardioChart = new Chart($('cardioChart'), {
 });
 
 // ════════════════════════════════════════════════════════════════════════════
+//  Cadence feedback chart — a scrolling RPM indicator. The user's (firmware-
+//  smoothed) RPM is a moving green dot; the WK_RPM_HIGH / WK_RPM_LOW thresholds
+//  are flat blue / red guide lines. It shows where cadence is vs where to keep it.
+// ════════════════════════════════════════════════════════════════════════════
+const cadLabels = [];
+const cadRpm    = [];
+const cadHigh   = [];
+const cadLow    = [];
+const cadenceChart = new Chart($('cadenceChart'), {
+  type: 'line',
+  data: {
+    labels: cadLabels,
+    datasets: [
+      // Upper threshold (blue), user RPM (green, moving dot), lower threshold (red).
+      { label: 'Upper', data: cadHigh, borderColor: '#60a5fa', borderWidth: 1.5,
+        borderDash: [5, 4], pointRadius: 0, tension: 0 },
+      { label: 'RPM', data: cadRpm, borderColor: '#4ade80', backgroundColor: '#4ade80',
+        borderWidth: 1.5, tension: .25,
+        pointRadius:          ctx => ctx.dataIndex === ctx.dataset.data.length - 1 ? 5 : 0,
+        pointBackgroundColor: '#4ade80', pointBorderColor: '#4ade80' },
+      { label: 'Lower', data: cadLow, borderColor: '#f87171', borderWidth: 1.5,
+        borderDash: [5, 4], pointRadius: 0, tension: 0 },
+    ],
+  },
+  options: {
+    animation: false, responsive: true, maintainAspectRatio: false,
+    scales: {
+      x: { display: false },
+      y: { min: 0, max: WK_RPM_HIGH + CAD_Y_HEADROOM,
+           grid: { color: 'rgba(255,255,255,.05)' },
+           ticks: { color: '#55555c', font: { family: 'IBM Plex Mono', size: 10 } },
+           title: { display: true, text: 'rpm', color: '#55555c', font: { size: 10 } } },
+    },
+    plugins: { legend: { display: false } },
+  },
+});
+
+// Reflect the configured thresholds + averaging window into the legend labels.
+$('cad-high').textContent = WK_RPM_HIGH;
+$('cad-low').textContent  = WK_RPM_LOW;
+$('cad-avg-lbl').textContent = '(' + (CAD_AVG_MS / 1000) + ' s avg)';
+
+// Dashboard-side rolling average for the plotted RPM. We sample liveRpm every
+// animation frame into a timestamped ring and average everything within the last
+// CAD_AVG_MS, so the green dot is smoothed over that window regardless of frame or
+// plot rate. (This is on top of the firmware's own 300 ms RPM smoothing.)
+const cadAvgBuf = [];   // { t, rpm }
+function cadWindowedRpm(now) {
+  cadAvgBuf.push({ t: now, rpm: Math.abs(liveRpm) });
+  const cutoff = now - CAD_AVG_MS;
+  while (cadAvgBuf.length && cadAvgBuf[0].t < cutoff) cadAvgBuf.shift();
+  let sum = 0;
+  for (const s of cadAvgBuf) sum += s.rpm;
+  return cadAvgBuf.length ? sum / cadAvgBuf.length : 0;
+}
+
+// Push one scrolling sample (the windowed average). Driven by a throttled rAF loop
+// so the graph glides with time (and pauses cleanly when the tab is backgrounded).
+function pushCadenceSample(v) {
+  cadLabels.push('');
+  cadRpm.push(v);
+  cadHigh.push(WK_RPM_HIGH);
+  cadLow.push(WK_RPM_LOW);
+  if (cadLabels.length > CAD_MAX_POINTS) {
+    cadLabels.shift(); cadRpm.shift(); cadHigh.shift(); cadLow.shift();
+  }
+  setText('cadence-now', v.toFixed(0) + ' rpm');
+  cadenceChart.update('none');
+}
+let cadLastMs = 0;
+(function cadenceLoop() {
+  requestAnimationFrame(cadenceLoop);
+  const now = performance.now();
+  const avg = cadWindowedRpm(now);          // sample every frame to keep the window full
+  if (now - cadLastMs < CAD_PERIOD_MS) return;
+  cadLastMs = now;
+  pushCadenceSample(avg);                    // plot the rolling average, not the raw value
+})();
+
+// ════════════════════════════════════════════════════════════════════════════
 //  Frame processing — physics + session accumulation. Called from the rAF
 //  drain loop (below), once per queued frame, NOT per BLE notification.
 // ════════════════════════════════════════════════════════════════════════════
@@ -668,30 +834,35 @@ function resetAll() {
   setText('avg-vel', '–'); setText('avg-force', '–'); setText('avg-power', '–');
   renderDials();
   if (connected) writeCmd('RESET');             // zero the encoder cumulative position
-  setStatus(connected ? 'connected' : 'disconnected');
+  setStatus(connected ? 'connected' : (reconnecting ? 'reconnecting' : 'disconnected'));
   log('Reset — values, graph, and encoder zeroed');
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-//  Auto workout — resistance ramp
+//  Auto workout — cadence-adaptive load (no fixed ramp)
 //
 //  Phases:
-//    armed → waiting for the first rope pull (resistance held at WK_START_PCT)
-//    ramp  → linear WK_START_PCT → WK_PEAK_PCT over WK_RAMP_MS from first pull
-//    hold  → at WK_PEAK_PCT, stays there until the workout ends
+//    armed    → waiting for the first rope pull (resistance held at WK_START_PCT)
+//    adaptive → load moves per cadence: below WK_RPM_LOW rapid-down, in-band slow-up,
+//               above WK_RPM_HIGH rapid-up; clamped to [WK_START_PCT, WK_PEAK_PCT]
 //
-//  The ramp is advanced on a wall-clock setInterval (tickWorkout) rather than off
-//  incoming BLE frames, so the commanded resistance climbs smoothly and visibly
-//  regardless of frame timing. Pull detection and CSV logging happen per frame
-//  (observeWorkoutFrame). CSV columns: time_s, position, velocity, resistance, power.
+//  The load loop runs on a wall-clock setInterval (tickWorkout) rather than off
+//  incoming BLE frames, so the commanded resistance moves smoothly regardless of
+//  frame timing. Pull detection, the cadence windows, and CSV logging happen per
+//  frame (observeWorkoutFrame). CSV columns: time_s, position, velocity, resistance, power.
 // ════════════════════════════════════════════════════════════════════════════
 let workoutRows    = [];        // CSV rows: [time_s, position, velocity, resistance, power]
 let workoutRowT0Ms = 0;         // device ms of the first workout sample (time-column origin)
 
-function setWorkoutResistance(pct) {
+function setWorkoutResistance(pct, force = false) {
   wkResistance = Math.max(0, Math.min(100, pct));
   const iv = Math.round(wkResistance);
-  if (iv !== wkLastSentPct) {
+  uiCommandedPct = iv;               // the workout owns the load while it runs
+  // De-dupe identical writes (the load loop ticks at WK_TICK_MS), EXCEPT when
+  // forced. After a reconnect the firmware has released the brake but
+  // wkLastSentPct still holds the pre-drop value, so the de-dupe would swallow
+  // the re-assert and the rider would pull against nothing.
+  if (force || iv !== wkLastSentPct) {
     wkLastSentPct = iv;
     if (connected) writeCmd('R:' + iv);
   }
@@ -707,7 +878,7 @@ function setWorkoutPhase(phase) {
   const el = $('workout-phase');
   el.className = 'workout-phase' + (phase !== 'idle' ? ' ' + phase : '');
   const labels = { idle: 'Idle', armed: 'Armed — pull to start',
-                   ramp: 'Ramping', hold: 'Hold — auto-easing' };
+                   adaptive: 'Adaptive — match your cadence' };
   el.textContent = labels[phase] || phase;
   updateWorkoutIndicator();
 }
@@ -717,19 +888,44 @@ function updateWorkoutIndicator() {
   const dot = $('workout-dot'), txt = $('workout-pill-text'), pill = $('workout-pill');
   dot.className = 'dot' + (workoutActive ? ' ' + workoutPhase : '');
   pill.classList.toggle('on', workoutActive);
-  const labels = { armed: 'Workout · armed', ramp: 'Workout · ramping', hold: 'Workout · hold' };
-  txt.textContent = workoutActive ? (labels[workoutPhase] || 'Workout') : 'No Workout';
+  const labels = { armed: 'Workout · armed', adaptive: 'Workout · adaptive' };
+  let t = workoutActive ? (labels[workoutPhase] || 'Workout') : 'No Workout';
+  if (workoutActive && workoutPaused) t = 'Workout · paused';
+  txt.textContent = t;
+}
+
+// Freeze the workout when the link drops mid-session; resume() adds the elapsed
+// pause to workoutPausedTotalMs so the ramp/elapsed clocks pick up where they left off.
+function pauseWorkout() {
+  if (!workoutActive || workoutPaused) return;
+  workoutPaused     = true;
+  workoutPauseStart = performance.now();
+  log('Workout paused — link lost, will resume on reconnect', 'warn');
+  updateWorkoutIndicator();
+}
+function resumeWorkout() {
+  if (!workoutActive || !workoutPaused) return;
+  workoutPausedTotalMs += performance.now() - workoutPauseStart;
+  workoutPaused = false;
+  if (workoutPhase === 'adaptive') resetHoldCadence();   // drop the stale cadence window
+  // force=true: the firmware released the brake on the drop, so this write must
+  // go out even though the commanded value is unchanged from before the drop.
+  setWorkoutResistance(wkResistance, true);              // re-assert the load on the firmware
+  log('Workout resumed', 'ok');
+  updateWorkoutIndicator();
 }
 
 // Per-frame: detect the first pull, and log CSV rows while active.
 function observeWorkoutFrame(deviceMs, velocity, power, pos) {
   if (workoutPhase === 'armed' && velocity >= WK_PULL_VEL) {
     workoutPullMs = performance.now();
-    setWorkoutPhase('ramp');
-    log('Rope pull detected — ramping resistance to 100 % over 2 min', 'ok');
+    wkHoldPct = WK_START_PCT;          // begin adapting from the floor
+    resetHoldCadence();
+    setWorkoutPhase('adaptive');
+    log('Rope pull detected — load now adapts to your cadence', 'ok');
   }
-  // Once at peak, watch cadence and shed load if the user is bogging down.
-  if (workoutPhase === 'hold') monitorHoldCadence(deviceMs);
+  // While adapting, average cadence over rolling windows and steer the load.
+  if (workoutPhase === 'adaptive') monitorHoldCadence(deviceMs);
   if (workoutRows.length === 0) workoutRowT0Ms = deviceMs;
   const tSec = (deviceMs - workoutRowT0Ms) / 1000;
   workoutRows.push([
@@ -741,65 +937,55 @@ function observeWorkoutFrame(deviceMs, velocity, power, pos) {
   ].join(','));
 }
 
-// Clear the cadence-window accumulators (called when the hold phase begins).
+// Clear the cadence-window accumulators (called when adaptation begins).
 function resetHoldCadence() {
   wkWinStartMs = 0;
   wkWinRpmSum  = 0;
   wkWinSamples = 0;
-  wkLowWindows = 0;
+  wkZoneRate   = 0;
 }
 
-// Hold-phase cadence watchdog. Averages |rpm| over WK_VEL_WINDOW_MS windows; after
-// WK_LOW_WINDOWS consecutive windows below WK_MIN_RPM it sheds WK_LOAD_STEP_PCT
-// points off the held load and rearms, repeating until cadence recovers. Once the
-// user gets back over WK_MIN_RPM the load simply holds at its reduced level.
+// Cadence watchdog. Averages |rpm| over ONE WK_HOLD_WINDOW_MS window and, when the
+// window closes, picks the signed rate the load should move at:
+//   below WK_RPM_LOW  → rapid decrease · in-band → slow increase · above WK_RPM_HIGH → rapid increase.
+// tickWorkout() then applies that rate smoothly every tick until the next window closes.
 function monitorHoldCadence(deviceMs) {
   if (wkWinStartMs === 0) wkWinStartMs = deviceMs;   // open the first window lazily
   wkWinRpmSum += Math.abs(liveRpm);
   wkWinSamples++;
 
-  if (deviceMs - wkWinStartMs < WK_VEL_WINDOW_MS) return;   // window still filling
+  if (deviceMs - wkWinStartMs < WK_HOLD_WINDOW_MS) return;   // window still filling
 
   const avgRpm = wkWinSamples ? wkWinRpmSum / wkWinSamples : 0;
   // Start the next window fresh from this sample.
   wkWinStartMs = deviceMs;
   wkWinRpmSum  = 0;
   wkWinSamples = 0;
+  wkWinAvgRpm  = avgRpm;
 
-  if (avgRpm >= WK_MIN_RPM) { wkLowWindows = 0; return; }   // cadence fine — rearm
+  const prevRate = wkZoneRate;
+  let zone;
+  if (avgRpm < WK_RPM_LOW)        { wkZoneRate = -WK_RATE_RAPID; zone = 'rapid ↓'; }
+  else if (avgRpm <= WK_RPM_HIGH) { wkZoneRate = +WK_RATE_SLOW;  zone = 'slow ↑';  }
+  else                            { wkZoneRate = +WK_RATE_RAPID; zone = 'rapid ↑'; }
 
-  wkLowWindows++;
-  if (wkLowWindows < WK_LOW_WINDOWS) return;                // wait for the 2nd window
-  wkLowWindows = 0;                                         // require 2 fresh windows again
-
-  if (wkHoldPct <= WK_MIN_HOLD_PCT) {
-    log(`Cadence ${avgRpm.toFixed(0)} rpm < ${WK_MIN_RPM} — load already at floor ${WK_MIN_HOLD_PCT}%`, 'warn');
-    return;
+  if (wkZoneRate !== prevRate) {
+    log(`Cadence ${avgRpm.toFixed(0)} rpm — load ${zone} @ ${Math.abs(wkZoneRate).toFixed(2)} %/s (now ${Math.round(wkHoldPct)}%)`,
+        wkZoneRate < 0 ? 'warn' : '');
   }
-  wkHoldPct = Math.max(WK_MIN_HOLD_PCT, wkHoldPct - WK_LOAD_STEP_PCT);
-  setWorkoutResistance(wkHoldPct);
-  log(`Cadence ${avgRpm.toFixed(0)} rpm < ${WK_MIN_RPM} for ${WK_LOW_WINDOWS} windows — easing load to ${wkHoldPct}%`, 'warn');
 }
 
-// Wall-clock tick: drives the ramp + refreshes the UI (independent of BLE frames).
+// Wall-clock tick: drives the load loop + refreshes the UI (independent of BLE frames).
 function tickWorkout() {
   if (!workoutActive) return;
+  if (workoutPaused) return;                 // link lost — freeze the load loop & UI
   if (workoutPhase === 'armed') {
     setWorkoutResistance(WK_START_PCT);
-  } else if (workoutPhase === 'ramp') {
-    const t = performance.now() - workoutPullMs;
-    if (t >= WK_RAMP_MS) {
-      wkHoldPct = WK_PEAK_PCT;
-      resetHoldCadence();
-      setWorkoutResistance(wkHoldPct);
-      setWorkoutPhase('hold');
-      log('Ramp complete — holding at 100 %', 'ok');
-    } else {
-      const frac = t / WK_RAMP_MS;
-      setWorkoutResistance(WK_START_PCT + (WK_PEAK_PCT - WK_START_PCT) * frac);
-    }
-  } else if (workoutPhase === 'hold') {
-    // Command whatever the cadence watchdog has settled on (WK_PEAK_PCT or eased down).
+  } else if (workoutPhase === 'adaptive') {
+    // Move the load at the rate the cadence watchdog selected for the current band,
+    // clamped to [floor, peak]. wkZoneRate is signed (+increase / −decrease).
+    const dtSec = WK_TICK_MS / 1000;
+    wkHoldPct = Math.max(WK_MIN_HOLD_PCT, Math.min(WK_PEAK_PCT, wkHoldPct + wkZoneRate * dtSec));
     setWorkoutResistance(wkHoldPct);
   }
   updateWorkoutUI();
@@ -816,28 +1002,47 @@ function startWorkout() {
   workoutRowT0Ms = 0;
   wkResistance   = WK_START_PCT;
   wkLastSentPct  = -1;
-  wkHoldPct      = WK_PEAK_PCT;
+  wkHoldPct      = WK_START_PCT;
+  workoutPaused        = false;
+  workoutPauseStart    = 0;
+  workoutPausedTotalMs = 0;
   resetHoldCadence();
   setWorkoutPhase('armed');
   setWorkoutResistance(WK_START_PCT);
   updateWorkoutUI();
-  log('Workout armed — start pulling the rope to begin the ramp', 'ok');
+  log('Workout armed — start pulling the rope; the load will then track your cadence', 'ok');
   wkTimerHandle = setInterval(tickWorkout, WK_TICK_MS);
 }
 
 // end the workout; download === true downloads the CSV, false just stops (Reset).
 function endWorkout(download) {
   if (!workoutActive) return;
+  // Close out an in-flight pause first. Ending while paused (reconnect gave up,
+  // or Stop was clicked during a drop) would otherwise leave the final pause
+  // interval uncounted, so the elapsed timer would include all the dead link time.
+  if (workoutPaused) {
+    workoutPausedTotalMs += performance.now() - workoutPauseStart;
+    workoutPaused = false;
+  }
   workoutActive = false;
+  workoutPaused = false;
   clearInterval(wkTimerHandle); wkTimerHandle = null;
   setWorkoutPhase('idle');
   updateWorkoutIndicator();
   $('workout-timer').textContent = '';
-  $('workout-ramp-bar').style.width = '0%';
+  $('workout-load-bar').style.width = '0%';
   // Release the brake to a safe resting resistance.
-  if (connected) writeCmd('R:0');
-  wkResistance = 0; wkLastSentPct = 0;
-  setStatus(connected ? 'connected' : 'disconnected');   // re-enable the slider
+  wkResistance = 0;
+  uiCommandedPct = 0;
+  if (connected) {
+    writeCmd('R:0');
+    wkLastSentPct = 0;
+  } else {
+    // We could NOT send it. Leaving wkLastSentPct = 0 would make a later
+    // setWorkoutResistance(0) de-dupe against a write that never happened.
+    wkLastSentPct = -1;
+  }
+  setStatus(connected ? 'connected' : (reconnecting ? 'reconnecting' : 'disconnected'));   // re-enable the slider
 
   if (!download) return;
   if (!workoutRows.length) {
@@ -858,19 +1063,14 @@ function endWorkout(download) {
 function stopWorkout() { endWorkout(true); }
 
 function updateWorkoutUI() {
-  // Elapsed timer (from Start Workout click).
-  const s  = Math.floor((performance.now() - workoutStartMs) / 1000);
+  // Elapsed timer (from Start Workout click), excluding any paused time.
+  const s  = Math.floor((performance.now() - workoutStartMs - workoutPausedTotalMs) / 1000);
   const mm = String(Math.floor(s / 60)).padStart(2, '0');
   const ss = String(s % 60).padStart(2, '0');
   $('workout-timer').textContent = workoutActive ? `${mm}:${ss}` : '';
-  // Ramp progress bar.
-  let frac = 0;
-  if (workoutPhase === 'ramp' && workoutPullMs) {
-    frac = Math.min(1, (performance.now() - workoutPullMs) / WK_RAMP_MS);
-  } else if (workoutPhase === 'hold') {
-    frac = 1;
-  }
-  $('workout-ramp-bar').style.width = (frac * 100).toFixed(1) + '%';
+  // Load bar — reflects the current commanded resistance (0–100 %).
+  const frac = workoutActive ? Math.max(0, Math.min(1, wkResistance / 100)) : 0;
+  $('workout-load-bar').style.width = (frac * 100).toFixed(1) + '%';
   updateWorkoutButtons();
 }
 
@@ -892,34 +1092,105 @@ function withTimeout(promise, ms, label) {
   return Promise.race([promise, timeout]).finally(() => clearTimeout(to));
 }
 
+// Attach the disconnect listener to a device exactly once (survives reconnects,
+// since we reuse the same device object).
+function attachDeviceListeners(dev) {
+  dev.removeEventListener('gattserverdisconnected', onDisconnect);
+  dev.addEventListener('gattserverdisconnected', onDisconnect);
+}
+
+// (SOLUTION 1) Reusable GATT bring-up: connect → discover → subscribe. Called by
+// both the manual connect() and every auto-reconnect attempt, so a reconnect is a
+// full, valid re-subscription (the old characteristic objects are dead after a drop).
+async function establishGatt() {
+  if (!device) throw new Error('no device selected');
+  if (gattBusy) throw new Error('a connection attempt is already in progress');
+  gattBusy = true;
+  try {
+    return await establishGattInner();
+  } finally {
+    gattBusy = false;
+  }
+}
+
+async function establishGattInner() {
+  // (SOLUTION 2) Drop any stale/half-open GATT so the ESP gets a clean slate.
+  // NOTE: this fires `gattserverdisconnected` -> onDisconnect(), which would
+  // normally kick off a WHOLE NEW reconnect cycle racing this one. `gattBusy`
+  // is already set, and onDisconnect() bails out on it, so the teardown stays
+  // a teardown instead of spawning a competitor.
+  if (device.gatt.connected) { try { device.gatt.disconnect(); } catch (_) {} }
+
+  log('Connecting GATT…');
+  server = await withTimeout(device.gatt.connect(), 12000, 'GATT connect');
+  log('Discovering service…');
+  const service = await withTimeout(server.getPrimaryService(SERVICE_UUID), 8000, 'Service discovery');
+  log('Getting characteristics…');
+  txChar = await withTimeout(service.getCharacteristic(TX_UUID), 8000, 'TX characteristic');
+  rxChar = await withTimeout(service.getCharacteristic(RX_UUID), 8000, 'RX characteristic');
+  log('Starting notifications…');
+  await withTimeout(txChar.startNotifications(), 8000, 'startNotifications');
+  txChar.removeEventListener('characteristicvaluechanged', onNotify);
+  txChar.addEventListener('characteristicvaluechanged', onNotify);
+
+  connected = true;
+  rxBuf = '';
+  cancelReconnect();                 // we're up — clear any pending backoff
+  lastFrameMs = performance.now();
+  setStatus('connected');
+  startWatchdog();                   // (SOLUTION 3)
+  startKeepAlive();                  // (SOLUTION 8)
+  requestWakeLock();                 // (SOLUTION 4)
+  log('Connected to ' + (device.name || 'CardioDrum'), 'ok');
+  // Re-assert the commanded load. The firmware releases the brake on EVERY
+  // disconnect, so something must push it back or the UI silently lies about
+  // the load the rider is pulling against.
+  if (workoutActive && workoutPaused) {
+    resumeWorkout();                 // (SOLUTION 7) continue, don't discard — re-sends the load
+  } else if (needsResistanceReassert || uiCommandedPct > 0) {
+    // Covers the plain-slider case AND an active-but-never-paused workout:
+    // pauseWorkout() is skipped when onDisconnect() early-returns on
+    // `reconnecting`, so workoutPaused alone is not a reliable trigger.
+    await restoreCommandedResistance();
+  }
+  needsResistanceReassert = false;
+  await writeCmd('S');               // ask for a status line
+}
+
+// Push the commanded resistance back to the firmware after a reconnect.
+// Reads uiCommandedPct, NOT the slider DOM: incoming frames rewrite the slider
+// from the firmware's reported value, and the firmware reports 0 as soon as it
+// releases the brake on a drop — so the DOM has usually already been clobbered
+// to 0 by the time we get here.
+async function restoreCommandedResistance() {
+  const pct = uiCommandedPct;
+  await writeCmd('R:' + pct);
+  // Keep the workout de-dupe in sync with what the firmware now actually holds,
+  // so the next tickWorkout() isn't swallowed by a stale wkLastSentPct.
+  wkLastSentPct = pct;
+  if (pct > 0) log('Re-applied resistance ' + pct + '% after reconnect', 'ok');
+}
+
 async function connect() {
   if (!navigator.bluetooth) { log('Web Bluetooth unavailable — use Chrome/Edge desktop', 'err'); return; }
   try {
+    userInitiatedDisconnect = false;
+    cancelReconnect();
     log('Requesting device…');
     device = await navigator.bluetooth.requestDevice({
-      filters: [{ namePrefix: 'CardioDrum' }],
+      // Match on EITHER the name or the service UUID. The firmware advertises a
+      // minimal packet and carries its name in the SCAN RESPONSE (shorter packets
+      // survive better at the edge of range). Chrome active-scans, so the name is
+      // still seen — but filtering on the service UUID as well means discovery
+      // cannot break even if a scan response is missed or a stack passive-scans.
+      filters: [
+        { namePrefix: 'CardioDrum' },
+        { services: [SERVICE_UUID] },
+      ],
       optionalServices: [SERVICE_UUID],
     });
-    device.addEventListener('gattserverdisconnected', onDisconnect);
-
-    // If a stale GATT connection is lingering, drop it before reconnecting.
-    if (device.gatt.connected) { try { device.gatt.disconnect(); } catch (_) {} }
-
-    log('Connecting GATT…');
-    server = await withTimeout(device.gatt.connect(), 12000, 'GATT connect');
-    log('Discovering service…');
-    const service = await withTimeout(server.getPrimaryService(SERVICE_UUID), 8000, 'Service discovery');
-    log('Getting characteristics…');
-    txChar = await withTimeout(service.getCharacteristic(TX_UUID), 8000, 'TX characteristic');
-    rxChar = await withTimeout(service.getCharacteristic(RX_UUID), 8000, 'RX characteristic');
-    log('Starting notifications…');
-    await withTimeout(txChar.startNotifications(), 8000, 'startNotifications');
-    txChar.addEventListener('characteristicvaluechanged', onNotify);
-    connected = true;
-    rxBuf = '';
-    setStatus('connected');
-    log('Connected to ' + (device.name || 'CardioDrum'), 'ok');
-    await writeCmd('S');                          // ask for a status line
+    attachDeviceListeners(device);
+    await establishGatt();
   } catch (e) {
     log('Connect failed: ' + e.message, 'err');
     connected = false;
@@ -928,31 +1199,221 @@ async function connect() {
   }
 }
 
+// Deliberate user disconnect — no auto-reconnect, and the workout ends & saves.
 function disconnect() {
+  userInitiatedDisconnect = true;
+  cancelReconnect();
+  releaseWakeLock();
   if (device && device.gatt && device.gatt.connected) device.gatt.disconnect();
   else onDisconnect();
 }
 
+// Fires on any link loss (browser event OR our watchdog). Tears down the link
+// objects and — unless the user asked to disconnect — kicks off auto-reconnect.
 function onDisconnect() {
   connected = false;
   txChar = null; rxChar = null; server = null;
   rxBuf = ''; PENDING_FRAMES.length = 0;
-  if (workoutActive) { log('Disconnected mid-workout — ending & saving CSV', 'warn'); stopWorkout(); }
-  setStatus('disconnected');
-  log('Disconnected — click Connect to reconnect');
+  stopWatchdog();
+  stopKeepAlive();
+  // Latch this BEFORE any early return below. The firmware has released the
+  // brake, so whatever brings the link back must push the load again — and the
+  // `reconnecting` / `gattBusy` early-returns would otherwise skip the only
+  // code path that noticed.
+  needsResistanceReassert = true;
+
+  if (userInitiatedDisconnect) {
+    releaseWakeLock();
+    if (workoutActive) { log('Disconnected — ending & saving workout CSV', 'warn'); stopWorkout(); }
+    setStatus('disconnected');
+    log('Disconnected — click Connect to reconnect');
+    return;
+  }
+  if (reconnecting) return;          // a reconnect cycle already owns recovery
+  // A disconnect event raised by our OWN teardown at the top of establishGatt().
+  // That attempt already owns recovery; starting another here would race it.
+  if (gattBusy) return;
+  if (workoutActive) pauseWorkout(); // (SOLUTION 7) freeze rather than discard
+  setStatus('reconnecting');
+  log('Link lost — attempting to reconnect…', 'warn');
+  scheduleReconnect();               // (SOLUTION 1)
+}
+
+// ── (SOLUTION 1) Auto-reconnect with backoff on the retained device object ──────
+// No chooser dialog: device.gatt.connect() works on the same device as long as it
+// is advertising, which the firmware resumes ~500 ms after it sees the drop.
+function scheduleReconnect() {
+  if (reconnecting) return;
+  reconnecting = true;
+  reconnectAttempts = 0;
+  reconnectStartMs  = performance.now();
+  attemptReconnect();
+}
+
+async function attemptReconnect() {
+  if (userInitiatedDisconnect || !device) { reconnecting = false; return; }
+  // Never let two backoff chains coexist. Any previously scheduled attempt is
+  // superseded by this one; without this the old handle is leaked — it still
+  // fires, but reconnectTimer no longer points at it, so cancelReconnect() and
+  // the give-up path cannot stop it.
+  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+  reconnectAttempts++;
+  // Give up on elapsed time as well as attempt count, so the ceiling is a
+  // predictable "5 minutes of downtime" rather than an attempt count whose
+  // wall-clock meaning changes with the backoff curve.
+  const downMs = performance.now() - reconnectStartMs;
+  if (reconnectAttempts > RECONNECT_MAX_ATTEMPTS || downMs > RECONNECT_GIVEUP_MS) {
+    reconnecting = false;
+    // Clear any pending attempt too: otherwise it fires later and resurrects a
+    // session we have just declared dead and saved the CSV for.
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+    log(`Gave up after ${(downMs / 1000).toFixed(0)} s of retries — use Reconnect now / Connect`, 'err');
+    if (workoutActive) { log('Ending & saving workout CSV', 'warn'); stopWorkout(); }
+    releaseWakeLock();
+    setStatus('disconnected');
+    return;
+  }
+  // Exponential backoff (600 ms, 1.2 s, 2.4 s, 4.8 s, then 8 s) — fast where it
+  // matters (the device is usually back within a second) without hammering the
+  // OS BLE stack for minutes on end.
+  const delay = Math.min(RECONNECT_MAX_DELAY_MS,
+                         RECONNECT_BASE_DELAY_MS * Math.pow(2, reconnectAttempts - 1));
+  setStatus('reconnecting');
+  log(`Reconnect attempt ${reconnectAttempts}/${RECONNECT_MAX_ATTEMPTS} in ${(delay / 1000).toFixed(0)} s…`, 'warn');
+  reconnectTimer = setTimeout(async () => {
+    reconnectTimer = null;
+    if (userInitiatedDisconnect) { reconnecting = false; return; }
+    try {
+      await establishGatt();
+      log('Reconnected', 'ok');       // establishGatt already cleared `reconnecting`
+    } catch (e) {
+      log('Reconnect failed: ' + e.message, 'warn');
+      attemptReconnect();             // schedule the next backoff step
+    }
+  }, delay);
+}
+
+// Manual "Reconnect now" — skip the backoff wait and retry immediately (no chooser).
+function forceReconnectNow() {
+  if (!device) { connect(); return; }
+  if (gattBusy) { log('Already connecting…'); return; }
+  userInitiatedDisconnect = false;
+  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+  reconnecting = true;
+  reconnectAttempts = 0;
+  // A deliberate retry restarts the give-up clock. It must be SET, not left at
+  // 0 — attemptReconnect() measures downtime against it on the failure path, and
+  // 0 would read as "down since page load" and give up immediately.
+  reconnectStartMs = performance.now();
+  log('Manual reconnect…', 'ok');
+  (async () => {
+    try { await establishGatt(); log('Reconnected', 'ok'); }
+    catch (e) { log('Reconnect failed: ' + e.message, 'warn'); attemptReconnect(); }
+  })();
+}
+
+function cancelReconnect() {
+  reconnecting = false;
+  reconnectAttempts = 0;
+  reconnectStartMs  = 0;
+  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+}
+
+// ── (SOLUTION 3) Frame watchdog ────────────────────────────────────────────────
+// Chrome/Windows sometimes fires `gattserverdisconnected` late or not at all. The
+// ESP streams at 25 Hz, so a gap > WATCHDOG_TIMEOUT_MS means the link is dead even
+// if the browser hasn't noticed. Force a clean teardown (so the ESP re-advertises
+// immediately) and drive recovery ourselves.
+function startWatchdog() {
+  stopWatchdog();
+  lastFrameMs = performance.now();
+  watchdogTimer = setInterval(() => {
+    if (!connected) return;
+    if (performance.now() - lastFrameMs > WATCHDOG_TIMEOUT_MS) {
+      log(`No data for ${(WATCHDOG_TIMEOUT_MS / 1000).toFixed(1)} s — forcing reconnect`, 'warn');
+      stopWatchdog();
+      try { if (device && device.gatt.connected) device.gatt.disconnect(); } catch (_) {}
+      onDisconnect();               // don't wait for the (possibly missing) browser event
+    }
+  }, WATCHDOG_CHECK_MS);
+}
+function stopWatchdog() { if (watchdogTimer) { clearInterval(watchdogTimer); watchdogTimer = null; } }
+
+// ── (SOLUTION 8) Keep-alive ─────────────────────────────────────────────────────
+// A silent upstream ping so the OS BLE stack sees bidirectional traffic and is
+// less likely to idle the radio during quiet stretches. It also feeds the
+// firmware's peer dead-man timer (BLE_PEER_TIMEOUT_MS), which releases the brake
+// if the dashboard ever goes quiet on a half-open link.
+//
+// 'PING' rather than 'S': the firmware answers PING with nothing at all, whereas
+// 'S' costs a full [STATUS] notify every few seconds competing with the 25 Hz
+// data stream. A periodic [STATUS] is still useful for link telemetry, so one is
+// requested on a much slower cadence.
+function startKeepAlive() {
+  stopKeepAlive();
+  let tick = 0;
+  keepAliveTimer = setInterval(() => {
+    if (!connected) return;
+    // Every 10th ping (~30 s) ask for a real status line, for the link counters.
+    writeCmd((++tick % 10 === 0) ? 'S' : 'PING', true);
+  }, KEEPALIVE_MS);
+}
+function stopKeepAlive() { if (keepAliveTimer) { clearInterval(keepAliveTimer); keepAliveTimer = null; } }
+
+// ── (SOLUTION 4) Screen Wake Lock ───────────────────────────────────────────────
+// Keeps the laptop/tablet (and thus the BT radio) awake while a session is live.
+async function requestWakeLock() {
+  if (!('wakeLock' in navigator) || wakeLock) return;
+  try {
+    wakeLock = await navigator.wakeLock.request('screen');
+    wakeLock.addEventListener('release', () => { wakeLock = null; });
+  } catch (_) { /* denied / unsupported — non-fatal */ }
+}
+function releaseWakeLock() {
+  if (wakeLock) { try { wakeLock.release(); } catch (_) {} wakeLock = null; }
+}
+
+// ── (SOLUTION 6) Silent reconnect across page reloads ───────────────────────────
+// Chrome remembers granted devices; grab a known CardioDrum and connect with no
+// chooser. Best-effort: fails quietly if the permission store is empty or the
+// device isn't in range/advertising.
+async function trySilentReconnect() {
+  if (!navigator.bluetooth || !navigator.bluetooth.getDevices) return;
+  let devs;
+  try { devs = await navigator.bluetooth.getDevices(); } catch (_) { return; }
+  const known = (devs || []).find(d => d.name && d.name.startsWith('CardioDrum'));
+  if (!known) return;
+  device = known;
+  attachDeviceListeners(device);
+  userInitiatedDisconnect = false;
+  log('Found a previously paired CardioDrum — connecting…', 'ok');
+  try { await establishGatt(); }
+  catch (e) { log('Auto-connect not available (device asleep/out of range)'); setStatus('disconnected'); }
 }
 
 function onNotify(ev) {
   const dv = ev.target.value;                       // DataView
-  // A data frame is exactly 16 bytes of binary. Text lines ([STATUS]/[INFO])
-  // are longer and start with the ASCII '[' byte (0x5B).
-  if (dv.byteLength === 16 && dv.getUint8(0) !== 0x5B) {
+  lastFrameMs = performance.now();                  // (SOLUTION 3) feed the watchdog
+  // A data frame is EXACTLY 16 bytes of binary; every text line ([STATUS]/[INFO])
+  // the firmware emits is far longer than 16 bytes and arrives whole (MTU 512, one
+  // notify per setValue), so length alone is an unambiguous discriminator.
+  //
+  // NOTE: the old test also required byte0 !== '[' (0x5B). But byte0 is the low
+  // byte of the u32 millisecond timestamp, which is 0x5B for ~1 in 256 frames —
+  // those valid frames were being misdecoded as text, producing the "[P[U[Z[_"
+  // garbage seen prefixed to [STATUS] lines. Dropping that sub-condition fixes it.
+  if (dv.byteLength === 16) {
     PENDING_FRAMES.push({
       ms:  dv.getUint32 (0,  true),
       rpm: dv.getFloat32(4,  true),
       pos: dv.getInt32  (8,  true),
       r:   Math.round(dv.getFloat32(12, true)),
     });
+    // (SOLUTION 5) Bound the queue so a backgrounded tab (rAF drain paused) can't
+    // let it grow without limit; keep only the most recent PENDING_FRAMES_MAX.
+    if (PENDING_FRAMES.length > PENDING_FRAMES_MAX) {
+      PENDING_FRAMES.splice(0, PENDING_FRAMES.length - PENDING_FRAMES_MAX);
+    }
     return;
   }
   // Otherwise it's a text notification (status / info) — accumulate + split.
@@ -965,15 +1426,15 @@ function onNotify(ev) {
   }
 }
 
-async function writeCmd(cmd) {
-  if (!rxChar) { log('Not connected', 'warn'); return; }
+async function writeCmd(cmd, silent = false) {
+  if (!rxChar) { if (!silent) log('Not connected', 'warn'); return; }
   const data = textEncoder.encode(cmd + '\n');
   try {
     if (rxChar.writeValueWithoutResponse) await rxChar.writeValueWithoutResponse(data);
     else await rxChar.writeValue(data);
-    log('→ ' + cmd);
+    if (!silent) log('→ ' + cmd);
   } catch (e) {
-    log('Write failed: ' + e.message, 'err');
+    if (!silent) log('Write failed: ' + e.message, 'err');
   }
 }
 
@@ -990,13 +1451,39 @@ function handleLine(line) {
   log(line);
 }
 
+// Last uptime reported by the ESP, to detect a reboot across a reconnect.
+let lastEspUptimeS = null;
+
+function formatUptime(sec) {
+  if (sec < 60)   return sec + 's';
+  if (sec < 3600) return Math.floor(sec / 60) + 'm';
+  return Math.floor(sec / 3600) + 'h' + Math.floor((sec % 3600) / 60) + 'm';
+}
+
 function handleStatus(s) {
   if (!s) return;
   const parts = [];
   if (s.name) parts.push(s.name);
   if (s.fw)   parts.push('fw ' + s.fw);
   if (s.heap) parts.push('heap ' + Math.round(s.heap / 1024) + 'KB');
+  // Link telemetry from firmware >= 1.1: uptime and the drop counter make a
+  // flaky link diagnosable from the dashboard alone. A rising `disc` with the
+  // dashboard none the wiser means the ESP is dropping us; an `up` that keeps
+  // resetting means the board is rebooting (brownout / watchdog), which is a
+  // completely different fault with a completely different fix.
+  if (typeof s.up   === 'number') parts.push('up ' + formatUptime(s.up));
+  if (typeof s.disc === 'number' && s.disc > 0) parts.push(s.disc + ' drops');
+  if (typeof s.i2crec === 'number' && s.i2crec > 0) parts.push(s.i2crec + ' i2c-rec');
   $('esp-info').textContent = parts.join(' · ');
+  // Warn once per session if the board has rebooted under us — a short uptime
+  // right after a "reconnect" means we reconnected to a freshly booted device,
+  // not to the one we were talking to, so its encoder zero has been lost.
+  if (typeof s.up === 'number') {
+    if (lastEspUptimeS !== null && s.up + 2 < lastEspUptimeS) {
+      log('ESP rebooted (uptime reset) — encoder zero lost; Reset to re-zero', 'warn');
+    }
+    lastEspUptimeS = s.up;
+  }
   if (typeof s.r === 'number' && !sliderDragging && !workoutActive) {
     $('resistance-slider').value = s.r;
     $('resistance-val').textContent = s.r;
@@ -1009,7 +1496,7 @@ function handleStatus(s) {
 function setText(id, v) { const el = $(id); if (el) el.textContent = v; }
 
 function setStatus(state) {
-  const dot = $('status-dot'), txt = $('status-text');
+  const dot = $('status-dot'), txt = $('status-text'), rc = $('btn-reconnect');
   dot.className = 'dot';
   if (state === 'connected') {
     dot.classList.add('on'); txt.textContent = 'Connected';
@@ -1017,6 +1504,15 @@ function setStatus(state) {
     $('btn-disconnect').disabled    = false;
     $('btn-reset').disabled         = false;
     $('resistance-slider').disabled = workoutActive;   // workout owns the brake
+    rc.style.display = 'none';
+  } else if (state === 'reconnecting') {
+    dot.classList.add('reconnecting'); txt.textContent = 'Reconnecting…';
+    $('btn-connect').disabled       = true;
+    $('btn-disconnect').disabled    = false;            // lets the user cancel & fully disconnect
+    $('btn-reset').disabled         = true;
+    $('resistance-slider').disabled = true;
+    rc.style.display = '';                              // "Reconnect now" — skip the backoff wait
+    rc.disabled = false;
   } else {
     txt.textContent = 'Disconnected';
     $('btn-connect').disabled       = false;
@@ -1026,6 +1522,8 @@ function setStatus(state) {
     $('hz-pill').style.display = 'none';
     $('esp-info').textContent = '';
     sampleTimes.length = 0;
+    rc.style.display = device ? '' : 'none';            // offer a chooser-free retry if we know the device
+    rc.disabled = false;
   }
   updateWorkoutButtons();
 }
@@ -1048,6 +1546,7 @@ function switchTab(id) {
 //  Event wiring
 // ════════════════════════════════════════════════════════════════════════════
 $('btn-connect').addEventListener('click', connect);
+$('btn-reconnect').addEventListener('click', forceReconnectNow);
 $('btn-disconnect').addEventListener('click', disconnect);
 $('btn-workout-start').addEventListener('click', startWorkout);
 $('btn-workout-stop').addEventListener('click', stopWorkout);
@@ -1058,6 +1557,7 @@ slider.addEventListener('input', () => {
   const v = parseInt(slider.value, 10);
   $('resistance-val').textContent = v;
   sliderDragging = true;
+  uiCommandedPct = v;              // deliberate user command — record the intent
   const now = performance.now();
   if (now - lastSliderSendMs >= SLIDER_THROTTLE_MS) {
     lastSliderSendMs = now;
@@ -1067,7 +1567,9 @@ slider.addEventListener('input', () => {
 function sliderRelease() {
   if (!sliderDragging) return;
   sliderDragging = false;
-  writeCmd('R:' + parseInt(slider.value, 10));   // final authoritative value
+  const v = parseInt(slider.value, 10);
+  uiCommandedPct = v;              // final authoritative value
+  writeCmd('R:' + v);
 }
 slider.addEventListener('change', sliderRelease);
 slider.addEventListener('pointerup', sliderRelease);
@@ -1077,9 +1579,53 @@ document.querySelectorAll('.tab').forEach(t => {
   t.addEventListener('click', () => switchTab(t.dataset.tab));
 });
 
+// (SOLUTIONS 4 + 5) Re-acquire the wake lock and trim any frame backlog when the
+// tab returns to the foreground (the OS releases the lock on hide, and the rAF
+// drain loop pauses while backgrounded).
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'visible') return;
+  if (connected) requestWakeLock();
+  if (PENDING_FRAMES.length > PENDING_FRAMES_MAX) {
+    PENDING_FRAMES.splice(0, PENDING_FRAMES.length - PENDING_FRAMES_MAX);
+  }
+  // Coming back to the foreground is the single best moment to retry: the laptop
+  // has usually just woken, the radio is back, and any pending backoff timer is
+  // needlessly making the user wait. Skip straight to an attempt.
+  retryNow();
+});
+
+// The OS regaining connectivity often coincides with the radio being re-powered
+// after a sleep/resume cycle — another good moment to retry immediately.
+window.addEventListener('online', retryNow);
+
+// Shared guard for the opportunistic retry triggers. These can fire in bursts
+// (a wake often raises visibilitychange AND online within a few ms), so they must
+// not stack up into overlapping connection attempts.
+function retryNow() {
+  if (connected || userInitiatedDisconnect || !device || gattBusy) return;
+  forceReconnectNow();
+}
+
+// Restoring from the bfcache leaves every GATT object dead while `connected` may
+// still read true. Force a full teardown + recovery rather than trusting it.
+window.addEventListener('pageshow', (e) => {
+  if (!e.persisted) return;
+  if (device && !(device.gatt && device.gatt.connected)) { connected = false; onDisconnect(); }
+});
+
+// Release the brake on the way out. Best-effort: the page may be killed before
+// the write lands, which is exactly why the firmware also releases on disconnect
+// and on its own peer dead-man timer.
+window.addEventListener('pagehide', () => {
+  if (connected) { try { writeCmd('STOP', true); } catch (_) {} }
+});
+
 // Initial UI state
 setStatus('disconnected');
 updateWorkoutIndicator();
+
+// (SOLUTION 6) Attempt a chooser-free reconnect to a previously paired device.
+trySilentReconnect();
 </script>
 </body>
 </html>
