@@ -135,6 +135,18 @@ input[type=range]:disabled { opacity: .4; }
 .log-ok   { color: var(--green); }
 .log-warn { color: var(--amber); }
 .log-err  { color: var(--red); }
+  /* Fault banner - fixed, so it is visible mid-rep regardless of scroll. */
+  .fault-banner {
+    position: fixed; left: 50%; transform: translateX(-50%); bottom: 18px;
+    max-width: min(620px, calc(100vw - 32px)); z-index: 9999;
+    padding: 12px 18px; border-radius: 10px; cursor: pointer;
+    font-size: 14px; line-height: 1.45; color: #fff;
+    box-shadow: 0 8px 28px rgba(0,0,0,.45);
+  }
+  .fault-banner.crit { background: #8b1a1f; border: 1px solid #f85149; }
+  .fault-banner.warn { background: #7a5c10; border: 1px solid #d29922; }
+  .fault-banner span  { opacity: .9; font-size: 13px; }
+  .fault-banner small { opacity: .6; font-size: 11px; }
 </style>
 </head>
 <body>
@@ -377,6 +389,19 @@ let liveCumCounts = 0;   // raw signed encoder counts from firmware
 // Incoming binary frames are queued here and drained once per animation frame
 // (decouples BLE arrival rate from render rate). Each entry: {ms, rpm, pos, r}.
 const PENDING_FRAMES = [];
+
+// ---- Fault state (declared here, ahead of first use) ----------------------
+// startWorkout() clears these and endWorkout() reads them, and both are
+// defined far above the RIDER_FAULTS registry. `const`/`let` are hoisted but
+// sit in the temporal dead zone until their declaration executes, so leaving
+// these next to the registry made an early call throw ReferenceError. Keep
+// them with the rest of the module state.
+//
+// seenFaults: faults announced this session, so each is reported once.
+// sessionDataSuspect: set when a fault invalidates the workout numbers; read
+// at export time so a rider is never handed data we know to be wrong.
+const seenFaults = new Set();
+let sessionDataSuspect = false;
 
 // Energy integration (drives the live cumulative-energy tile).
 let lastTs = null;                 // device ms of previous frame
@@ -1010,6 +1035,11 @@ function startWorkout() {
   workoutStartMs = performance.now();
   workoutPullMs  = 0;
   workoutRows    = [];
+  // Fresh session, fresh fault slate: a reboot or encoder fault from an
+  // earlier session must not flag THIS workout's data as suspect, and a fault
+  // that recurs deserves to be announced again.
+  seenFaults.clear();
+  sessionDataSuspect = false;
   workoutRowT0Ms = 0;
   wkResistance   = WK_START_PCT;
   wkLastSentPct  = -1;
@@ -1060,7 +1090,19 @@ function endWorkout(download) {
     log('Workout ended — no samples recorded, nothing saved', 'warn');
     return;
   }
-  const header = 'time_s,position,velocity_ms,resistance_pct,power_W\n';
+  // If a fault during this session made the numbers untrustworthy, say so
+  // BOTH in the log and inside the CSV. A file that outlives this page is
+  // exactly where a silent caveat gets lost — someone comparing sessions
+  // months later has no other way to know an encoder fault or a board reboot
+  // corrupted these rows.
+  let header = '';
+  if (sessionDataSuspect) {
+    const why = [...seenFaults].filter(k => RIDER_FAULTS[k] && RIDER_FAULTS[k].invalidates);
+    header += '# WARNING: data quality suspect - ' + why.join(', ') + '\n';
+    log('Saved WITH a data-quality warning (' + why.join(', ') +
+        ') — treat these numbers with caution', 'warn');
+  }
+  header += 'time_s,position,velocity_ms,resistance_pct,power_W\n';
   const blob = new Blob([header + workoutRows.join('\n') + '\n'], { type: 'text/csv' });
   const fname = 'workout_' + new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19) + '.csv';
   const a = document.createElement('a');
@@ -1478,13 +1520,102 @@ async function writeCmd(cmd, silent = false) {
 // ════════════════════════════════════════════════════════════════════════════
 //  Text dispatcher — [STATUS] / [INFO]  (data frames are binary, see onNotify)
 // ════════════════════════════════════════════════════════════════════════════
+// ── Fault detection ───────────────────────────────────────────────────
+// Ported from cardio_diagnostics.html, but trimmed to what a RIDER needs
+// mid-session. The diagnostics page enumerates 17 faults for forensics; here
+// the question is only "should I trust this session, and is anything unsafe?"
+//
+// Each entry says whether it invalidates the workout data, because a rider
+// finishing a session on numbers produced during an encoder fault or a board
+// reboot is worse than a rider who was told to stop.
+const RIDER_FAULTS = {
+  DEADMAN: {
+    banner: 'Brake released automatically — the board stopped hearing this page',
+    advice: 'Resistance has been set to 0 for safety. Reconnect before continuing.',
+    invalidates: false, sev: 'err',
+  },
+  DEADMAN_UNDERFLOW: {
+    banner: 'Firmware bug detected — update the board',
+    advice: 'This board is running firmware older than 1.3, which drops healthy links at ' +
+            'random. Reflash before relying on a session.',
+    invalidates: false, sev: 'err',
+  },
+  REBOOT: {
+    banner: 'Board rebooted — encoder zero and distance are lost',
+    advice: 'Press Reset to re-zero. Distance and energy before this point are not comparable ' +
+            'with what follows.',
+    invalidates: true, sev: 'err',
+  },
+  BROWNOUT: {
+    banner: 'Power supply problem — the board browned out',
+    advice: 'The supply sagged enough to reset the board. Check the cable and power source ' +
+            'before trusting a session.',
+    invalidates: true, sev: 'err',
+  },
+  ENCODER: {
+    banner: 'Encoder fault — RPM and distance may be wrong',
+    advice: 'The position sensor glitched and the bus was re-initialised. Check the encoder ' +
+            'connector; readings around this moment are unreliable.',
+    invalidates: true, sev: 'err',
+  },
+  RF_LOSS: {
+    banner: 'Link lost to interference or range',
+    advice: 'Move closer to the board or clear the path between you and it.',
+    invalidates: false, sev: 'warn',
+  },
+};
+
+function riderFault(key, detail) {
+  const f = RIDER_FAULTS[key];
+  if (!f || seenFaults.has(key)) return;
+  seenFaults.add(key);
+  if (f.invalidates) sessionDataSuspect = true;
+  log(f.banner + (detail ? ' (' + detail + ')' : ''), f.sev);
+  log('→ ' + f.advice, 'warn');
+  showFaultBanner(f);
+}
+
+// One persistent, dismissible banner. A rider mid-rep is not reading a log.
+function showFaultBanner(f) {
+  let el = document.getElementById('fault-banner');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'fault-banner';
+    el.className = 'fault-banner';
+    el.addEventListener('click', () => el.remove());
+    document.body.appendChild(el);
+  }
+  el.className = 'fault-banner ' + (f.sev === 'err' ? 'crit' : 'warn');
+  el.innerHTML = '<strong>' + f.banner + '</strong><br><span>' + f.advice +
+                 '</span><br><small>tap to dismiss</small>';
+}
+
 function handleLine(line) {
   if (line.startsWith('[STATUS]')) {
     try { handleStatus(JSON.parse(line.slice(8).trim())); }
     catch (e) { log('Bad STATUS JSON', 'err'); }
     return;
   }
-  if (line.startsWith('[INFO]')) { log(line.slice(6).trim()); return; }
+  if (line.startsWith('[INFO]')) {
+    const body = line.slice(6).trim();
+    // Matches BOTH the tagged 1.3+ form and the legacy 1.2 wording, so an
+    // un-reflashed board is still diagnosed correctly.
+    if (body.startsWith('DEADMAN peer silent') || body.startsWith('peer silent for')) {
+      const ms = parseInt((body.match(/silent (?:for )?(\d+) ms/) || [])[1], 10);
+      // A silence near 2^32 ms is the unsigned-underflow bug, not real silence.
+      riderFault(Number.isFinite(ms) && ms > 4000000000 ? 'DEADMAN_UNDERFLOW' : 'DEADMAN',
+                 Number.isFinite(ms) ? ms + ' ms' : '');
+      log(body, 'err');
+      return;
+    }
+    if (body.startsWith('I2CRECOVER') || body.startsWith('I2C bus recovered')) {
+      riderFault('ENCODER', body.replace(/^(I2CRECOVER|I2C bus recovered)/, '').trim());
+      log(body, 'warn');
+      return;
+    }
+    log(body);
+    return;
+  }
   log(line);
 }
 
@@ -1493,6 +1624,9 @@ let lastEspUptimeS = null;
 // Last HCI drop reason we logged, so a steady `dreason` is not re-logged at the
 // [STATUS] cadence — only a NEW drop reason is worth a line.
 let lastDropReasonSeen = null;
+// Last I2C recovery count seen, so an encoder fault is announced only when the
+// count actually RISES rather than on every status line.
+let lastI2cRec = 0;
 
 function formatUptime(sec) {
   if (sec < 60)   return sec + 's';
@@ -1570,9 +1704,20 @@ function handleStatus(s) {
     lastDropReasonSeen = s.dreason;
     const d = describeDropReason(s.dreason);
     log('Last drop: ' + d.text, d.level);
+    // 0x08 supervision timeout / 0x22 LMP timeout are the only codes that mean
+    // the RADIO actually lost the link; everything else is a deliberate
+    // hang-up and telling the rider to "move closer" would be wrong.
+    if (s.dreason === 0x08 || s.dreason === 0x22) riderFault('RF_LOSS', '0x' + s.dreason.toString(16));
   }
 
   // Brownout is a hardware fault, so warn loudly but only once per session.
+  // Reset-reason routing. SUPPLY_RESETS is the verified ESP_RST_* mapping.
+  if (typeof s.rst === 'number' && SUPPLY_RESETS.includes(s.rst)) riderFault('BROWNOUT');
+  if (typeof s.i2crec === 'number' && s.i2crec > lastI2cRec) {
+    lastI2cRec = s.i2crec;
+    if (s.i2crec > 0) riderFault('ENCODER', s.i2crec + ' bus recoveries');
+  }
+
   if (typeof s.bor === 'number' && s.bor > 0 && !warnedBrownout) {
     warnedBrownout = true;
     log(`Supply rail sagging: ${s.bor} brownout reset(s) since power-on. ` +
@@ -1598,6 +1743,7 @@ function handleStatus(s) {
   if (typeof s.up === 'number') {
     if (lastEspUptimeS !== null && s.up + 2 < lastEspUptimeS) {
       log('ESP rebooted (uptime reset) — encoder zero lost; Reset to re-zero', 'warn');
+    riderFault('REBOOT');
     }
     lastEspUptimeS = s.up;
   }

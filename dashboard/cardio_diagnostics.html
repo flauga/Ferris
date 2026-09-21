@@ -639,9 +639,11 @@ const FAULTS = {
     why: "Frames are arriving far below 25 Hz while the link is still up. A smooth decline " +
          "with distance is RF; a sharp onset is loop() stalling." },
   FRAME_GAP: {
-    sev: "minor", label: "Frame gap", notRange: false,
-    why: "A stall in the data stream that did not kill the link. Clusters of these are the " +
-         "earliest warning that range is running out." },
+    sev: "minor", label: "Frame gap", notRange: true,
+    why: "A stall in the data stream that did not kill the link. MEASURED: the firmware emits " +
+         "at exactly 40.0 ms (p50/p99/max all 40.0), while arrival gaps reach 300 ms+ - so " +
+         "isolated gaps are Chrome/Windows notification jitter, NOT the radio. Only a rising " +
+         "RATE of gaps as you walk away is range evidence; a steady background count is normal." },
   STALE_POSITION: {
     sev: "major", label: "Encoder position frozen", notRange: true,
     why: "Position has not changed across many frames. Expected with no magnet fitted; " +
@@ -905,9 +907,12 @@ function onNotify(ev) {
     const cutoff = now - RATE_WINDOW_MS;
     while (frameTimes.length && frameTimes[0] < cutoff) frameTimes.shift();
 
-    // Frame gap: a stall that did not kill the link. 200 ms is 5x the nominal
-    // 40 ms period, so ordinary jitter never trips it.
-    if (lastFrameAt && gap > 200) raise('FRAME_GAP', Math.round(gap) + ' ms');
+    // Frame gap threshold. Measured on this hardware: firmware emits at exactly
+    // 40.0 ms, but Chrome/Windows delivery jitter alone reaches ~315 ms, which
+    // produced 54 "faults" in a healthy 5-minute session. 200 ms was therefore
+    // measuring the host's scheduler, not the link. 400 ms (10x nominal) sits
+    // above observed jitter so a raised gap means something actually happened.
+    if (lastFrameAt && gap > 400) raise('FRAME_GAP', Math.round(gap) + ' ms');
 
     const pos = dv.getInt32(8, true);
     if (pos === lastPos) {
