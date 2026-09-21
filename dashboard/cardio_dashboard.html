@@ -1189,14 +1189,21 @@ async function connect() {
     cancelReconnect();
     log('Requesting device…');
     device = await navigator.bluetooth.requestDevice({
-      // Match on EITHER the name or the service UUID. The firmware advertises a
-      // minimal packet and carries its name in the SCAN RESPONSE (shorter packets
-      // survive better at the edge of range). Chrome active-scans, so the name is
-      // still seen — but filtering on the service UUID as well means discovery
-      // cannot break even if a scan response is missed or a stack passive-scans.
+      // Match on the NAME ONLY. A {services:[SERVICE_UUID]} filter was here too,
+      // but this firmware reuses the stock Nordic UART UUID, which is shared with
+      // every other NUS device — including other boards on this bench (an
+      // "Aroleapx2" unit was observed advertising the same UUID at -60 dBm).
+      // Those boards matched the filter, appeared in the chooser, and connected
+      // successfully because the service and characteristics line up — then
+      // streamed nothing. That presents exactly like a flaky link, which makes it
+      // very easy to misdiagnose as a range problem.
+      //
+      // The name lives in the SCAN RESPONSE (the advertising packet is kept
+      // minimal for range). Chrome active-scans, so it always issues a SCAN_REQ
+      // and sees the name; namePrefix matches scan-response data as well as the
+      // advertising packet, so discovery is unaffected.
       filters: [
         { namePrefix: 'CardioDrum' },
-        { services: [SERVICE_UUID] },
       ],
       optionalServices: [SERVICE_UUID],
     });
@@ -1360,14 +1367,25 @@ function stopWatchdog() { if (watchdogTimer) { clearInterval(watchdogTimer); wat
 // 'S' costs a full [STATUS] notify every few seconds competing with the 25 Hz
 // data stream. A periodic [STATUS] is still useful for link telemetry, so one is
 // requested on a much slower cadence.
+let lastKeepAliveAt = 0;
+let keepAliveTickCount = 0;
+
+// Send one keep-alive, whoever asks. Both the timer below and the frame-driven
+// backstop call this, and it self-throttles so the two can never double up.
+function sendKeepAlive() {
+  if (!connected) return;
+  const now = performance.now();
+  if (now - lastKeepAliveAt < KEEPALIVE_MS * 0.8) return;   // too soon
+  lastKeepAliveAt = now;
+  // Every 10th ping (~30 s) ask for a real status line, for the link counters.
+  writeCmd((++keepAliveTickCount % 10 === 0) ? 'S' : 'PING', true);
+}
+
 function startKeepAlive() {
   stopKeepAlive();
-  let tick = 0;
-  keepAliveTimer = setInterval(() => {
-    if (!connected) return;
-    // Every 10th ping (~30 s) ask for a real status line, for the link counters.
-    writeCmd((++tick % 10 === 0) ? 'S' : 'PING', true);
-  }, KEEPALIVE_MS);
+  keepAliveTickCount = 0;
+  lastKeepAliveAt = performance.now();
+  keepAliveTimer = setInterval(sendKeepAlive, KEEPALIVE_MS);
 }
 function stopKeepAlive() { if (keepAliveTimer) { clearInterval(keepAliveTimer); keepAliveTimer = null; } }
 
@@ -1414,6 +1432,14 @@ function onNotify(ev) {
   // those valid frames were being misdecoded as text, producing the "[P[U[Z[_"
   // garbage seen prefixed to [STATUS] lines. Dropping that sub-condition fixes it.
   if (dv.byteLength === 16) {
+    // Keep-alive backstop. setInterval is throttled (or paused) in a hidden or
+    // occluded tab, which can starve the upstream writes that feed the
+    // firmware's peer dead-man timer — the tab goes quiet, the firmware decides
+    // the peer is gone and releases the brake mid-session. Incoming notifies are
+    // NOT throttled, so driving the keep-alive off the data stream as well makes
+    // the upstream heartbeat as reliable as the downstream one. sendKeepAlive()
+    // self-throttles, so this costs nothing while the timer is running normally.
+    if (connected && performance.now() - lastKeepAliveAt >= KEEPALIVE_MS) sendKeepAlive();
     PENDING_FRAMES.push({
       ms:  dv.getUint32 (0,  true),
       rpm: dv.getFloat32(4,  true),
@@ -1464,12 +1490,59 @@ function handleLine(line) {
 
 // Last uptime reported by the ESP, to detect a reboot across a reconnect.
 let lastEspUptimeS = null;
+// Last HCI drop reason we logged, so a steady `dreason` is not re-logged at the
+// [STATUS] cadence — only a NEW drop reason is worth a line.
+let lastDropReasonSeen = null;
 
 function formatUptime(sec) {
   if (sec < 60)   return sec + 's';
   if (sec < 3600) return Math.floor(sec / 60) + 'm';
   return Math.floor(sec / 3600) + 'h' + Math.floor((sec % 3600) / 60) + 'm';
 }
+
+// ── HCI disconnect-reason decoder ─────────────────────────────────────────────
+// This is the single most useful number for diagnosing a flaky link, because it
+// splits the problem cleanly in half:
+//   0x08 supervision timeout  -> a REAL RF problem (range, interference, a body
+//                                in the path). Worth tuning antennas/TX power.
+//   0x3E failed to establish  -> the connection never completed; usually an
+//                                advertising/discovery problem, not range.
+//   0x13 remote user term.    -> the BROWSER/OS hung up on us. No amount of RF
+//   0x16 local host term.        tuning helps; the fix is on the dashboard side.
+//   0x22 LMP response timeout -> stack-level stall, often a driver issue.
+const HCI_REASONS = {
+  0x08: ['supervision timeout', 'RF: out of range or interference', 'err'],
+  0x13: ['remote user terminated', 'the browser/OS closed the link — not an RF fault', 'warn'],
+  0x16: ['local host terminated', 'we closed the link (peer dead-man or Reset)', 'warn'],
+  0x22: ['LMP response timeout', 'BLE stack stall on one side', 'err'],
+  0x3E: ['failed to establish', 'discovery/advertising problem, not range', 'err'],
+};
+function describeDropReason(code) {
+  const e = HCI_REASONS[code];
+  const hex = '0x' + code.toString(16).toUpperCase().padStart(2, '0');
+  return e ? { text: `${hex} ${e[0]} — ${e[1]}`, level: e[2] }
+           : { text: `${hex} (unmapped HCI reason)`, level: 'warn' };
+}
+
+// ── ESP32 reset-reason decoder (esp_reset_reason_t) ───────────────────────────
+// Matches the enum order in esp_system.h. ESP_RST_BROWNOUT (6) is the one that
+// matters here: it means the SUPPLY RAIL sagged, which also means the radio was
+// not transmitting at the power the firmware configured. A brownout reset looks
+// exactly like a BLE drop from here (device vanishes, re-advertises), so without
+// this the rail problem is indistinguishable from an RF problem.
+const RESET_REASONS = {
+  0:'unknown', 1:'power-on', 2:'external pin', 3:'software', 4:'panic/exception',
+  5:'interrupt watchdog', 6:'task watchdog', 7:'other watchdog', 8:'deep-sleep wake',
+  9:'BROWNOUT', 10:'SDIO', 11:'USB', 12:'JTAG', 13:'efuse error',
+  14:'power glitch', 15:'CPU lockup',
+};
+// Supply-failure reset codes. Verified against esp_system.h (enum starts at
+// ESP_RST_UNKNOWN=0): BROWNOUT is 9, not 6 — an earlier table here was off by
+// three and would have reported a task-watchdog hang as a power problem.
+const SUPPLY_RESETS = [9, 14];
+
+let warnedBrownout = false;
+let warnedDetectorOff = false;
 
 function handleStatus(s) {
   if (!s) return;
@@ -1485,7 +1558,40 @@ function handleStatus(s) {
   if (typeof s.up   === 'number') parts.push('up ' + formatUptime(s.up));
   if (typeof s.disc === 'number' && s.disc > 0) parts.push(s.disc + ' drops');
   if (typeof s.i2crec === 'number' && s.i2crec > 0) parts.push(s.i2crec + ' i2c-rec');
+  // Rail diagnostics from firmware >= 1.2. `bor` counts brownout resets since
+  // power-on; anything above zero means the supply is the bottleneck and the
+  // configured +9 dBm TX power is not what actually reaches the antenna.
+  if (typeof s.bor === 'number' && s.bor > 0) parts.push(s.bor + ' brownout');
   $('esp-info').textContent = parts.join(' · ');
+
+  // Surface the reason for the LAST drop, once per new value. This is what tells
+  // you whether to chase RF or chase the browser.
+  if (typeof s.dreason === 'number' && s.dreason > 0 && s.dreason !== lastDropReasonSeen) {
+    lastDropReasonSeen = s.dreason;
+    const d = describeDropReason(s.dreason);
+    log('Last drop: ' + d.text, d.level);
+  }
+
+  // Brownout is a hardware fault, so warn loudly but only once per session.
+  if (typeof s.bor === 'number' && s.bor > 0 && !warnedBrownout) {
+    warnedBrownout = true;
+    log(`Supply rail sagging: ${s.bor} brownout reset(s) since power-on. ` +
+        `TX power is below the configured +9 dBm — fix the supply ` +
+        `(bulk cap at the module, better cable/PSU) before chasing RF.`, 'err');
+  }
+  if (typeof s.rst === 'number' && SUPPLY_RESETS.includes(s.rst)) {
+    log('This boot was a BROWNOUT reset — the device rebooted on a supply sag, ' +
+        'it did not lose the BLE link.', 'err');
+  }
+  // `bod` reports whether the brownout detector is armed. With it suppressed the
+  // `bor` counter cannot fire, so absence of brownouts proves nothing. This gets
+  // its OWN once-per-session flag: sharing warnedBrownout would let this
+  // informational line suppress the real brownout warning above.
+  if (s.bod === 0 && typeof s.bor === 'number' && s.bor === 0 && !warnedDetectorOff) {
+    warnedDetectorOff = true;
+    log('Brownout detector is disabled — 0 brownouts is not proof of a clean rail. ' +
+        'Set BROWNOUT_DETECT_ENABLE 1 to verify.', 'warn');
+  }
   // Warn once per session if the board has rebooted under us — a short uptime
   // right after a "reconnect" means we reconnected to a freshly booted device,
   // not to the one we were talking to, so its encoder zero has been lost.

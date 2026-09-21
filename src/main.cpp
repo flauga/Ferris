@@ -16,12 +16,27 @@
 //                              uint32 ms | float32 rpm | int32 pos | float32 resistance
 //    esp -> app   data (USB):  ASCII mirror [<ms>ms] RPM:<rpm.1> POS:<cumcounts> R:<pct>
 //                              (Serial only, for debugging on a plain monitor)
-//    esp -> app   status: [STATUS] {"name":"CardioDrum","r":<pct>,"heap":<n>,"fw":"1.0"}
+//    esp -> app   status: [STATUS] {"name":..,"r":..,"heap":..,"fw":"1.2",
+//                              "conn":..,"disc":..,"dreason":..,"up":..,"i2crec":..,
+//                              "rst":..,"bor":..,"rsts":..,"bod":..}
+//                              dreason = HCI reason of the last drop (0x08 = RF
+//                              supervision timeout, 0x13/0x16 = the browser hung
+//                              up, 0x3E = never established).
+//                              rst/bor/rsts/bod = supply-rail diagnostics: this
+//                              boot's reset reason, brownout resets and total
+//                              resets since power-on, and whether the brownout
+//                              detector is armed.
 //    esp -> app   info:   [INFO] <message>
 //    app -> esp   cmds:   R:<nn> | RESET | S | STOP | PING | DIAG ON | DIAG OFF
 //
 //  Link reliability (see include/config.h for the tunables):
 //    - TX power at max (+9 dBm) for both advertising and the connected link.
+//    - Advertising and scan-response payloads are built EXPLICITLY so the core
+//      cannot auto-append the device name and overflow the 31-byte limit (which
+//      silently dropped the stack back to a default advertisement).
+//    - Supply-rail diagnostics: brownout resets are counted across reboots and
+//      reported, because a sagging rail cuts real TX power and is otherwise
+//      indistinguishable from an RF range problem.
 //    - 6 s supervision timeout and zero slave latency, re-requested on connect,
 //      so brief RF blockage (a body passing through the path, a Wi-Fi burst)
 //      is ridden out instead of dropping the session.
@@ -46,6 +61,7 @@
 #include "soc/rtc_cntl_reg.h"  // RTC_CNTL_BROWN_OUT_REG
 #include <esp_task_wdt.h>      // loop watchdog — reboot instead of wedging silently
 #include <esp_bt.h>            // esp_ble_tx_power_set / esp_power_level_t
+#include <esp_system.h>        // esp_reset_reason() — supply-rail diagnostics
 // NOTE: esp_wifi.h is deliberately NOT included. Calling esp_wifi_stop() pulled
 // the whole Wi-Fi driver into the link (+74 KB flash, 87% -> 93% of the
 // partition) just to stop a driver this firmware never starts. Wi-Fi is never
@@ -90,6 +106,11 @@ static volatile bool  pendingConnParams = false;  // re-request conn params from
 // millis() of the last thing we heard FROM the peer (any RX write, including the
 // dashboard's keep-alive). Drives BLE_PEER_TIMEOUT_MS brake release.
 static volatile uint32_t lastPeerMs = 0;
+// Edge latch for the dead-man above, so the brake is released ONCE per silence
+// rather than re-fired on every ~1 ms tick, and so the peer's recovery can be
+// logged. Deltas against lastPeerMs MUST be computed as SIGNED - see the
+// dead-man block in loop() for the underflow this prevents.
+static bool peerSilent = false;
 
 // Advertising state. advertising==false while a central is connected. The
 // re-assert timer re-kicks advertising periodically while unconnected, so a
@@ -108,6 +129,24 @@ static volatile uint32_t disconnectAtMs  = 0;   // millis() of the drop; 0 = not
 static volatile uint32_t connectCount    = 0;   // lifetime connections (diagnostic)
 static volatile uint32_t disconnectCount = 0;   // lifetime drops (diagnostic)
 static volatile uint16_t lastDiscReason  = 0;   // HCI reason code of the last drop
+
+// ---- Supply-rail diagnostics -----------------------------------------------
+// Brownout resets are counted in RTC_NOINIT memory, which survives a RESET but
+// not a power cycle — exactly the lifetime we want. A tally that survived a
+// power cycle would report stale history from a previous session; one kept in
+// ordinary RAM would be wiped by the very reset it is trying to record.
+//
+// RTC_NOINIT_ATTR is deliberately NOT zero-initialised by the startup code, so
+// it must be validated with a magic word before it is trusted: on the first boot
+// after power-on it holds whatever was in RTC RAM.
+#define RAIL_DIAG_MAGIC 0x43447631u   // "CDv1" — marks the tally as initialised
+RTC_NOINIT_ATTR static uint32_t railDiagMagic;
+RTC_NOINIT_ATTR static uint32_t brownoutResets;   // resets attributed to brownout
+RTC_NOINIT_ATTR static uint32_t totalResets;      // resets since power-on
+
+// Reset reason for THIS boot, captured once in setup() before anything can
+// overwrite it. Reported in [STATUS] as "rst".
+static uint8_t  lastResetReason = 0;
 
 // ---- I2C / encoder health --------------------------------------------------
 static uint32_t i2cFailCount   = 0;   // consecutive failed reads
@@ -220,6 +259,27 @@ static float computeRPM(uint32_t nowUs) {
     return rpm;
 }
 
+// ---- Safe millis() deltas --------------------------------------------------
+// EVERY timeout in this firmware compares a stale `nowMs` (sampled once at the
+// top of loop()) against a timestamp that may have been written LATER by the
+// BLE task. With unsigned arithmetic, "later" underflows to ~4.29e9 ms and
+// fires the timeout instantly. That bug killed healthy BLE links for weeks and
+// presented as a range problem (see the dead-man block in loop()).
+//
+// msSince() is the only correct way to age a millis() timestamp here:
+//   - signed result, so a future timestamp gives a small negative age
+//   - correct across the 49.7-day millis() rollover, because the subtraction is
+//     done in uint32 and only THEN reinterpreted as signed
+// Use it for every timeout; never write `now - then >= LIMIT` directly.
+static inline int32_t msSince(uint32_t nowMs, uint32_t thenMs) {
+    return (int32_t)(nowMs - thenMs);
+}
+
+// True when `thenMs` is at least `limitMs` in the past, underflow-safe.
+static inline bool msElapsed(uint32_t nowMs, uint32_t thenMs, uint32_t limitMs) {
+    return msSince(nowMs, thenMs) >= (int32_t)limitMs;
+}
+
 // ---- Non-blocking Serial ---------------------------------------------------
 // Serial.print* BLOCKS once the UART TX FIFO is full, which happens whenever the
 // firmware emits faster than the host drains (and always when no monitor is
@@ -228,6 +288,15 @@ static float computeRPM(uint32_t nowUs) {
 // USB debug path can kill the wireless link. Every Serial write below is gated
 // on there being room in the TX buffer, so output is DROPPED rather than
 // allowed to stall the loop. Diagnostics are best-effort; the link is not.
+// availableForWrite() reports the free space in the UART TX RING BUFFER, and
+// falls back to the 128-byte HARDWARE FIFO when no ring buffer is installed.
+// Serial.begin() without an explicit txBufferSize installs none, so the value
+// was capped at 128 — and every line longer than that (notably [STATUS], at
+// ~236 bytes) failed this check on EVERY call and was silently dropped forever.
+// SERIAL_TX_BUFFER_BYTES below installs a real ring buffer so long lines fit.
+//
+// The check stays: it is what keeps a full buffer from BLOCKING Serial.write()
+// and stalling loop(). Only the capacity was wrong, not the idea.
 static inline bool serialHasRoom(size_t need) {
     return Serial && (size_t)Serial.availableForWrite() >= need;
 }
@@ -284,11 +353,12 @@ static void recoverI2C() {
 static void sendLine(const char *s) {
     serialLine(s);                      // drop-don't-block: never stall the BLE task
     if (deviceConnected && pTxChar) {
-        // MUST hold the biggest line sendStatus() can build (~155 bytes) plus
-        // the newline and NUL. At 160 this had 3 bytes of headroom: one more
-        // [STATUS] field and the JSON would be silently truncated mid-object,
-        // which the dashboard surfaces only as "Bad STATUS JSON".
-        char buf[256];
+        // MUST hold the biggest line sendStatus() can build, plus the newline
+        // and NUL. Keep this >= sendStatus()'s own buffer (320): if it is
+        // smaller, the JSON is silently truncated mid-object and the dashboard
+        // surfaces it only as "Bad STATUS JSON". Adding a [STATUS] field means
+        // checking BOTH buffers.
+        char buf[352];
         int n = snprintf(buf, sizeof(buf), "%s\n", s);
         if (n < 0) return;
         if (n >= (int)sizeof(buf)) n = sizeof(buf) - 1;
@@ -321,17 +391,41 @@ static void sendFrame(uint32_t ms, float rpm, int32_t pos, int resistance) {
 }
 
 static void sendStatus() {
-    char buf[224];
+    // Sized for the FULL line with every field at its widest (32-bit counters
+    // printed in full). The rail-diagnostic fields below pushed the worst case
+    // past the previous 224, and a truncated line reaches the dashboard only as
+    // "Bad STATUS JSON" — see the matching note in sendLine()'s buffer.
+    char buf[320];
     // Extra link telemetry so a flaky connection can be diagnosed from the
     // dashboard log instead of needing a serial monitor: lifetime connect/drop
     // counts, the HCI reason code of the last drop, uptime and I2C recoveries.
+    //
+    // Rail diagnostics (rst/bor/rsts): "rst" is THIS boot's reset reason, "bor"
+    // the brownout resets since power-on and "rsts" all resets since power-on.
+    // A climbing "bor" mid-session means the supply is sagging, NOT that the RF
+    // link is bad — the two are indistinguishable from the dashboard otherwise,
+    // because a brownout reset also makes the device vanish and re-advertise.
+#if RAIL_DIAG_ENABLE
     snprintf(buf, sizeof(buf),
-             "[STATUS] {\"name\":\"%s\",\"r\":%d,\"heap\":%u,\"fw\":\"1.1\","
+             "[STATUS] {\"name\":\"%s\",\"r\":%d,\"heap\":%u,\"fw\":\"1.2\","
+             "\"conn\":%lu,\"disc\":%lu,\"dreason\":%u,\"up\":%lu,\"i2crec\":%lu,"
+             "\"rst\":%u,\"bor\":%lu,\"rsts\":%lu,\"bod\":%d}",
+             BLE_DEVICE_NAME, currentResistance, (unsigned)ESP.getFreeHeap(),
+             (unsigned long)connectCount, (unsigned long)disconnectCount,
+             (unsigned)lastDiscReason,
+             (unsigned long)(millis() / 1000), (unsigned long)i2cRecoveries,
+             (unsigned)lastResetReason,
+             (unsigned long)brownoutResets, (unsigned long)totalResets,
+             BROWNOUT_DETECT_ENABLE ? 1 : 0);
+#else
+    snprintf(buf, sizeof(buf),
+             "[STATUS] {\"name\":\"%s\",\"r\":%d,\"heap\":%u,\"fw\":\"1.2\","
              "\"conn\":%lu,\"disc\":%lu,\"dreason\":%u,\"up\":%lu,\"i2crec\":%lu}",
              BLE_DEVICE_NAME, currentResistance, (unsigned)ESP.getFreeHeap(),
              (unsigned long)connectCount, (unsigned long)disconnectCount,
              (unsigned)lastDiscReason,
              (unsigned long)(millis() / 1000), (unsigned long)i2cRecoveries);
+#endif
     sendLine(buf);
 }
 
@@ -357,6 +451,16 @@ static void handleCommand(String cmd) {
         // Keep-alive. Deliberately silent: the point is only to give the OS BLE
         // stack bidirectional traffic (and to feed lastPeerMs) without spending
         // a notify slot on a [STATUS] payload every few seconds.
+    } else if (upper == "REBOOT") {
+        // Software reset. Useful during range testing (recover the board without
+        // physical access) and the only way to exercise the RTC-persisted rail
+        // counters: pulling EN low resets the whole RTC domain and reports
+        // POWERON_RESET, which legitimately clears them, so EN cannot test them.
+        sendLine("[INFO] rebooting");
+        requestResistance(0);            // SAFETY: never reboot with the brake on
+        scaleResistance(0);              // actuate immediately; loop() won't run again
+        delay(50);                       // let the line drain before the reset
+        esp_restart();
     } else if (upper == "STOP") {
         requestResistance(0);
         sendLine("[INFO] brake released (STOP)");
@@ -501,16 +605,77 @@ static void initLoopWatchdog() {
 
 // ---- Setup -----------------------------------------------------------------
 void setup() {
-    // Disable the hardware brownout detector. The BLE stack startup draws a
-    // current spike that sags a marginal USB supply below the ~2.97V trip
-    // threshold, causing a reset loop. Disabling it here is safe for a
-    // permanently USB/mains-powered device — the chip resets naturally if
-    // power is actually lost, just without the extra supervisor trip.
-    WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0);
+    // ---- Supply rail: record the reset cause, THEN decide on the detector ---
+    // Order matters. esp_reset_reason() must be read before anything touches the
+    // brownout register, and the tally must be updated before BLE starts so a
+    // boot loop is still counted if the stack never comes up.
+    lastResetReason = (uint8_t)esp_reset_reason();
+    if (railDiagMagic != RAIL_DIAG_MAGIC) {
+        // First boot after a power cycle: RTC_NOINIT holds garbage. Seed it.
+        railDiagMagic  = RAIL_DIAG_MAGIC;
+        brownoutResets = 0;
+        totalResets    = 0;
+    } else {
+        totalResets++;
+        if (lastResetReason == ESP_RST_BROWNOUT) brownoutResets++;
+    }
 
+    // The hardware brownout detector. BLE stack startup draws a current spike
+    // that sags a marginal USB supply below the ~2.97V trip threshold, causing a
+    // reset loop — which is why this was previously disabled unconditionally.
+    //
+    // Disabling it does NOT fix the rail, it only hides it: a sagging VDD3P3_RF
+    // reduces PA output power, so the +9 dBm configured below is not what
+    // actually goes on air. Re-arm the detector (BROWNOUT_DETECT_ENABLE 1) after
+    // improving the supply to CONFIRM the fix — no resets with it armed means
+    // the rail is clean and the TX power setting is real.
+#if BROWNOUT_DETECT_ENABLE
+    // Left at its hardware default (armed). Nothing to do.
+#else
+    WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0);
+#endif
+
+    // Install an explicit TX ring buffer. Without one, availableForWrite() is
+    // limited to the 128-byte hardware FIFO and serialHasRoom() rejects every
+    // line longer than that — which silently suppressed [STATUS] on Serial.
+    // Must be >= the longest line sendLine() can emit (see its buffer).
+    Serial.setTxBufferSize(SERIAL_TX_BUFFER_BYTES);
     Serial.begin(SERIAL_BAUD);
     delay(200);
     Serial.println(F("[INFO] Cardio Drum Trainer — ESP32"));
+
+#if RAIL_DIAG_ENABLE
+    // Boot-time rail report. Printed with the plain (blocking) Serial API on
+    // purpose: this is bring-up, the BLE task does not exist yet, so there is no
+    // link for a stalled write to starve, and this line must never be dropped.
+    {
+        const char *why;
+        switch (lastResetReason) {
+            case ESP_RST_POWERON:  why = "power-on";                break;
+            case ESP_RST_BROWNOUT: why = "BROWNOUT (supply sag!)";  break;
+            case ESP_RST_SW:       why = "software";                break;
+            case ESP_RST_PANIC:    why = "panic/exception";         break;
+            case ESP_RST_TASK_WDT: why = "task watchdog";           break;
+            case ESP_RST_INT_WDT:  why = "interrupt watchdog";      break;
+            case ESP_RST_WDT:      why = "other watchdog";          break;
+            case ESP_RST_DEEPSLEEP:why = "deep-sleep wake";         break;
+            case ESP_RST_EXT:      why = "external pin";            break;
+            case ESP_RST_SDIO:     why = "SDIO";                    break;
+            default:               why = "unknown";                 break;
+        }
+        Serial.printf("[INFO] reset reason: %s (%u) | brownout resets: %lu of %lu since power-on\n",
+                      why, (unsigned)lastResetReason,
+                      (unsigned long)brownoutResets, (unsigned long)totalResets);
+        Serial.printf("[INFO] brownout detector: %s\n",
+                      BROWNOUT_DETECT_ENABLE ? "ARMED (rail-confirmation mode)"
+                                             : "disabled (suppressed, rail unverified)");
+        if (brownoutResets > 0) {
+            Serial.println(F("[INFO] *** Supply rail is sagging. TX power is NOT the +9 dBm configured: ***"));
+            Serial.println(F("[INFO] *** a drooping VDD3P3_RF cuts real PA output. Fix the supply    ***"));
+            Serial.println(F("[INFO] *** (bulk cap at the module, better cable/PSU) before blaming RF.***"));
+        }
+    }
+#endif
 
     // Arm the loop watchdog EARLY. Armed at the end of setup() it did not cover
     // setup() at all — including BLEDevice::init(), which is the most likely
@@ -603,7 +768,19 @@ void setup() {
     // Keep the receiver hot between connection events. Modem sleep saves current
     // that a mains/USB-powered trainer does not need to save, and costs wake-up
     // latency that makes a marginal link likelier to miss an event.
-    esp_bt_sleep_disable();
+    //
+    // Check the return: this call fails silently if the controller is not yet in
+    // a state to accept it, and a silent failure is indistinguishable from a
+    // working call — which made the "is modem sleep actually off?" question
+    // unanswerable. It also costs ~40 mA, so see the A/B note in config.h: if
+    // range is BETTER with this compiled out, the supply rail is the real limit.
+    {
+        esp_err_t slpErr = esp_bt_sleep_disable();
+        Serial.printf("[INFO] modem sleep disable: %s\n",
+                      slpErr == ESP_OK ? "ok" : esp_err_to_name(slpErr));
+    }
+#else
+    Serial.println(F("[INFO] modem sleep left ENABLED (rail A/B experiment)"));
 #endif
     BLEDevice::setMTU(BLE_MTU);
     pServer = BLEDevice::createServer();
@@ -628,20 +805,51 @@ void setup() {
     // name, and setMinPreferred(0x06) is the well-known workaround that stops iOS
     // and some Windows stacks from imposing a sluggish connection interval.
     BLEAdvertising *pAdv = pServer->getAdvertising();
-    pAdv->addServiceUUID(SERVICE_UUID);
-    pAdv->setScanResponse(true);
 #if BLE_NAME_IN_SCAN_RESPONSE
-    // Keep the ADVERTISING packet minimal (flags + 128-bit service UUID) and put
-    // the device name in the SCAN RESPONSE instead. A 128-bit UUID already eats
-    // 18 of the 31 payload bytes; adding "CardioDrum" on top risks overflowing
-    // the packet, and a shorter packet is on air for less time — fewer bits to
-    // corrupt and less chance of colliding with a Wi-Fi burst, which is exactly
-    // what limits reception at the edge of range.
+    // ---- Explicit advertising payload (overflow-proof) ---------------------
+    // The previous code called addServiceUUID() + setScanResponseData() and
+    // TRUSTED the core to keep the name out of the advertising packet. It does
+    // not. BLEAdvertising::start() builds the adv payload itself and appends the
+    // device name set in BLEDevice::init() whenever m_advData was never supplied
+    // by the caller; setScanResponseData() only populates the SCAN RESPONSE and
+    // does nothing to suppress that. The result was
+    //     flags(3) + 128-bit UUID(18) + "CardioDrum"(12) = 33 bytes
+    // against the 31-byte legacy-advertising limit. esp_ble_gap_config_adv_data()
+    // then fails with ESP_ERR_INVALID_ARG and the stack advertises a DEFAULT
+    // payload — which is why discovery and range were worse here than on other
+    // boards using the same PCB.
+    //
+    // Fix: supply BOTH payloads explicitly so nothing is auto-appended, and move
+    // the 128-bit service UUID into the scan response alongside the name. The
+    // advertising packet then carries only flags — it is tiny, spends minimal
+    // time on air (fewer bits to corrupt, less chance of colliding with a Wi-Fi
+    // burst) and cannot overflow.
+    //
+    // Discovery still works: the dashboard's requestDevice() filters on
+    // {namePrefix:'CardioDrum'} OR {services:[SERVICE_UUID]}, and Web Bluetooth
+    // matches BOTH filters against scan-response data as well as the advertising
+    // packet. Centrals that scan actively (every OS Web Bluetooth runs on) issue
+    // a SCAN_REQ and get the name + UUID in the SCAN_RSP.
     {
+        BLEAdvertisementData advData;
+        // BR/EDR not supported + LE General Discoverable. Set explicitly: an
+        // advertisement with no flags at all is treated as non-discoverable by
+        // some centrals.
+        advData.setFlags(0x06);
+        pAdv->setAdvertisementData(advData);
+
         BLEAdvertisementData scanRsp;
         scanRsp.setName(BLE_DEVICE_NAME);
+        scanRsp.setCompleteServices(BLEUUID(SERVICE_UUID));
         pAdv->setScanResponseData(scanRsp);
     }
+    pAdv->setScanResponse(true);
+#else
+    // Legacy layout: UUID in the advertising packet. Kept only as an escape
+    // hatch for a central that does not scan actively; it is 21 of 31 bytes and
+    // leaves no room for the name, so the name is unavailable pre-connection.
+    pAdv->addServiceUUID(SERVICE_UUID);
+    pAdv->setScanResponse(true);
 #endif
     pAdv->setMinInterval(BLE_ADV_MIN_INTERVAL);
     pAdv->setMaxInterval(BLE_ADV_MAX_INTERVAL);
@@ -684,7 +892,7 @@ void loop() {
     // we only treat it as a fault when the cheap isConnected() probe also fails.
     // Probing is rate-limited so it never doubles the per-tick I2C traffic.
     static uint32_t lastProbeMs = 0;
-    if (nowMs - lastProbeMs >= 1000) {
+    if (msElapsed(nowMs, lastProbeMs, 1000)) {
         lastProbeMs = nowMs;
         if (!as5600.isConnected()) {
             if (++i2cFailCount >= I2C_FAIL_LIMIT) recoverI2C();
@@ -703,7 +911,7 @@ void loop() {
     // hits the supervision timeout -> spurious disconnect.
     // Columns: ms, raw(0-4095), delta, cum_counts, rpm
     static uint32_t lastDiagMs = 0;
-    if (diagMode && (nowMs - lastDiagMs >= DIAG_PERIOD_MS)) {
+    if (diagMode && msElapsed(nowMs, lastDiagMs, DIAG_PERIOD_MS)) {
         lastDiagMs = nowMs;
         serialPrintf("DIAG,%lu,%u,%d,%ld,%.2f\n",
                      (unsigned long)nowMs, rawAngle, (int)delta,
@@ -711,7 +919,7 @@ void loop() {
     }
 
     // Fixed-rate data push.
-    if (nowMs - lastPushMs >= SAMPLE_PERIOD_MS) {
+    if (msElapsed(nowMs, lastPushMs, SAMPLE_PERIOD_MS)) {
         lastPushMs += SAMPLE_PERIOD_MS;
         // Resync whenever we are still a WHOLE period behind after that step,
         // i.e. more than one push was missed. The old test (> 2 periods) let a
@@ -720,7 +928,7 @@ void loop() {
         // pile into the controller queue and notify() DROPS silently on
         // ESP_ERR_NO_MEM — losing exactly the frames we were trying to deliver.
         // Skipping straight to now costs one gap instead of a lossy burst.
-        if (nowMs - lastPushMs >= SAMPLE_PERIOD_MS) lastPushMs = nowMs;
+        if (msElapsed(nowMs, lastPushMs, SAMPLE_PERIOD_MS)) lastPushMs = nowMs;
 
         sendFrame(nowMs, rpm, cumCounts, currentResistance);
     }
@@ -730,7 +938,7 @@ void loop() {
     // callback via a timestamp rather than a blocking delay(500) inside loop():
     // that delay stalled the encoder sampling and the data push for half a
     // second on every drop, and delayed nothing useful.
-    if (!deviceConnected && disconnectAtMs && (nowMs - disconnectAtMs >= BLE_READVERTISE_MS)) {
+    if (!deviceConnected && disconnectAtMs && msElapsed(nowMs, disconnectAtMs, BLE_READVERTISE_MS)) {
         disconnectAtMs = 0;
         startAdvertisingNow();
         serialPrintf("[INFO] re-advertising (drop #%lu, reason 0x%02X)\n",
@@ -746,7 +954,7 @@ void loop() {
     // watchdog cannot catch it, because loop() is running perfectly happily.
     // startAdvertising() on an already-advertising stack is a no-op, so running
     // this unconditionally costs nothing.
-    if (!deviceConnected && (nowMs - advReassertMs >= BLE_ADV_REASSERT_MS)) {
+    if (!deviceConnected && msElapsed(nowMs, advReassertMs, BLE_ADV_REASSERT_MS)) {
         startAdvertisingNow();
     }
 
@@ -757,7 +965,7 @@ void loop() {
     if (pendingConnParams && deviceConnected && peerAddrValid) {
         if (connParamsAtMs == 0) {
             connParamsAtMs = nowMs;
-        } else if (nowMs - connParamsAtMs >= 1000) {
+        } else if (msElapsed(nowMs, connParamsAtMs, 1000)) {
             pendingConnParams = false;
             connParamsAtMs    = 0;
             pServer->requestConnParams(peerAddr,
@@ -768,20 +976,52 @@ void loop() {
         connParamsAtMs = 0;
     }
 
-    // Peer dead-man. If the link is nominally up but the dashboard has said
-    // nothing for BLE_PEER_TIMEOUT_MS (much longer than its keep-alive cadence),
-    // the peer is gone in every sense that matters — a half-open link where our
-    // notifies vanish into the void. Release the brake so a rider is never left
-    // pulling against a load nobody is controlling, and drop the link so the
-    // dashboard's reconnect logic gets a clean slate to work with.
-    if (deviceConnected && (nowMs - lastPeerMs >= BLE_PEER_TIMEOUT_MS)) {
-        serialPrintf("[INFO] peer silent for %lu ms — releasing brake, dropping link\n",
-                     (unsigned long)(nowMs - lastPeerMs));
-        scaleResistance(0);                 // SAFETY first (we ARE loop(); direct is fine)
-        lastPeerMs = nowMs;                 // don't re-fire every tick
-        // Close THIS connection by the id captured on connect, not
-        // getConnId() — that is never reset and can name a newer link.
-        if (pServer && peerAddrValid) pServer->disconnect(peerConnId);
+    // ---- Peer dead-man ----------------------------------------------------
+    // Purpose: if the dashboard goes silent while the link is nominally up (a
+    // half-open link where our notifies vanish into the void), RELEASE THE
+    // BRAKE so a rider is never left pulling against a load nobody controls.
+    //
+    // Two bugs lived here, both of which killed healthy links:
+    //
+    // 1. UNSIGNED UNDERFLOW - the cause of the "random" disconnects.
+    //    `nowMs` is sampled ONCE at the top of loop(), but lastPeerMs is written
+    //    from the BLE task in onWrite() with its OWN, later millis(). A keep-alive
+    //    landing mid-iteration therefore made lastPeerMs GREATER than nowMs, and
+    //    the unsigned subtraction wrapped to ~4.29e9 ms - instantly past the
+    //    threshold. Observed live on a healthy link carrying 1875 frames at
+    //    24.4 Hz:
+    //        [INFO] peer silent for 4294967295 ms - releasing brake, dropping link
+    //    (4294967295 == UINT32_MAX == a 1 ms underflow.) The wrap made the failure
+    //    look random and load-dependent, which is what disguised it as an RF or
+    //    range problem.
+    //    Fix: read the timestamp ONCE into a local and compare as SIGNED, so a
+    //    peer timestamp from the future gives a small negative age instead of a
+    //    huge positive one. This is the standard safe idiom for millis() deltas
+    //    and stays correct across the 49.7-day rollover.
+    //
+    // 2. IT DROPPED THE LINK. Releasing the brake is the safety requirement;
+    //    tearing down a live GATT connection is a far bigger hammer than that
+    //    goal needs, and it forced a full reconnect (losing the encoder zero)
+    //    every time it misfired. Now the brake is released and the link is LEFT
+    //    UP: if the peer really is gone, the supervision timeout reaps the
+    //    connection on its own schedule; if it is not, we have cost nothing.
+    {
+        // Single read of the volatile: re-reading between the test and the log
+        // could otherwise report a different age than the one we acted on.
+        const uint32_t peerMs = lastPeerMs;
+        const int32_t  ageMs  = msSince(nowMs, peerMs);      // signed: future => negative
+
+        if (deviceConnected && ageMs >= (int32_t)BLE_PEER_TIMEOUT_MS) {
+            if (!peerSilent) {              // edge-triggered: act once per silence
+                peerSilent = true;
+                serialPrintf("[INFO] peer silent for %ld ms - releasing brake (link left up)\n",
+                             (long)ageMs);
+                scaleResistance(0);         // SAFETY (we ARE loop(); direct is fine)
+            }
+        } else if (peerSilent && ageMs < (int32_t)BLE_PEER_TIMEOUT_MS) {
+            peerSilent = false;             // peer spoke again - re-arm
+            serialPrintf("[INFO] peer alive again (age %ld ms)\n", (long)ageMs);
+        }
     }
 
     // Track connect/disconnect edges for anything that needs them.

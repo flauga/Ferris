@@ -13,6 +13,11 @@
 
 // ---- Serial ----------------------------------------------------------------
 #define SERIAL_BAUD            115200
+// UART TX ring buffer. MUST exceed the longest line the firmware emits (the
+// [STATUS] JSON, ~236 bytes) — with no ring buffer installed the Arduino core
+// reports only the 128-byte hardware FIFO as writable, and the drop-don't-block
+// guard in serialHasRoom() then discards every longer line, permanently.
+#define SERIAL_TX_BUFFER_BYTES 1024
 
 // ---- BLE (Nordic UART Service — reuse Ferra's UUIDs verbatim) --------------
 #define BLE_DEVICE_NAME        "CardioDrum"
@@ -40,10 +45,41 @@
 // would also need a Web-Bluetooth-capable central that negotiates Coded PHY.
 // Everything below is what IS available on a 4.2 radio.
 
+// ---- Supply-rail diagnostics ----------------------------------------------
+// The brownout detector was disabled outright as a workaround for BLE-startup
+// current spikes resetting the board on a marginal USB supply. That SUPPRESSED
+// the symptom without fixing the rail: a sagging VDD3P3_RF directly reduces PA
+// output power, so the radio cannot actually deliver the +9 dBm configured above
+// no matter what the power registers say. A sagging rail and a "max TX power"
+// setting look identical in firmware and very different on air.
+//
+// BROWNOUT_DETECT_ENABLE = 1 re-arms the hardware detector. Turn it on to CONFIRM
+// a rail fix (bulk capacitance at the module, a better cable/supply): if the
+// board no longer resets with the detector armed, the rail is genuinely clean and
+// the TX power setting is real. Leave it 0 for normal use on a known-marginal
+// supply, where a reset loop is worse than a slightly weak transmitter.
+#define BROWNOUT_DETECT_ENABLE   1
+
+// Report the reset reason and a brownout-reset tally in the [STATUS] line. A
+// brownout reset that happens mid-session otherwise looks exactly like a BLE
+// disconnect from the dashboard's point of view — the device vanishes and comes
+// back — so without this the rail problem is indistinguishable from an RF
+// problem, which is the single most confusing part of diagnosing this.
+#define RAIL_DIAG_ENABLE         1
+
 // Modem sleep. The BLE controller powers the radio down between connection
 // events to save current; on a mains/USB-powered device that only buys wake-up
 // latency and a slightly higher chance of missing an event on a marginal link.
 // Disabling it keeps the receiver consistently hot.
+//
+// BUT this is an A/B EXPERIMENT, not a settled choice. Disabling modem sleep
+// raises average current by roughly 40 mA, and on a marginal supply that extra
+// draw is exactly what sags VDD3P3_RF and cuts real PA output power. If range
+// IMPROVES with modem sleep left ENABLED (set this to 0), the supply rail is the
+// bottleneck, not the radio — that is the cheapest confirmation of the rail
+// theory available without a scope, so try both.
+//   1 = disable modem sleep (receiver always hot, ~40 mA more draw)
+//   0 = leave modem sleep enabled (stock, lower current)
 #define BLE_DISABLE_MODEM_SLEEP  1
 
 // Advertise at the connection-relevant power on ALL advertising handles, and
@@ -81,9 +117,18 @@
 #define BLE_ADV_REASSERT_MS    5000    // while unconnected, re-kick advertising this often
 
 // Link-loss safety. If the dashboard stops talking to us for this long while the
-// link is nominally up, treat the peer as gone and release the brake. Must be
-// comfortably longer than the dashboard's keep-alive cadence.
-#define BLE_PEER_TIMEOUT_MS    15000   // no command/keep-alive for 15 s -> release brake
+// link is nominally up, treat the peer as gone and RELEASE THE BRAKE. The link
+// itself is deliberately left up (see the dead-man block in loop()): releasing
+// the brake is the safety requirement, whereas tearing down a live GATT
+// connection is a much bigger hammer that costs a full reconnect and the
+// encoder zero.
+//
+// Raised 15s -> 30s. This must be comfortably longer than the dashboard's
+// keep-alive cadence (3 s) times a generous allowance for missed writes: a
+// backgrounded tab, a momentary RF stall, or a GC pause can easily swallow
+// several consecutive keep-alives, and firing the dead-man then is a false
+// positive that releases the brake mid-rep. 30 s = 10 missed keep-alives.
+#define BLE_PEER_TIMEOUT_MS    30000   // no command/keep-alive for 30 s -> release brake
 
 // Task watchdog: panics and reboots if loop() wedges (e.g. a hung I2C bus), so a
 // dead device comes back advertising instead of staying silent until power-cycled.

@@ -1,0 +1,1062 @@
+<!DOCTYPE html>
+<!-- ============================================================================
+     Cardio Drum Trainer — BLE LINK DIAGNOSTICS
+
+     A forensic tool, not a training UI. Its whole job is to answer ONE question:
+     when the link drops, WHY did it drop?
+
+     The firmware already reports the HCI disconnect reason (`dreason`) and
+     supply-rail telemetry (`rst`/`bor`/`rsts`/`bod`) in its [STATUS] line. This
+     page makes that legible: every drop is timestamped, attributed to a cause,
+     and classified as an RF fault, a host/browser fault, or a supply fault —
+     three problems that look identical from a normal dashboard but have
+     completely different fixes.
+
+     It also carries a resistance control, because a link only fails honestly
+     under load: the brake is the biggest current draw on the board, so a sagging
+     supply rail shows up when you engage it, not when the board is idle.
+
+     Deliberately standalone — it does not share code with cardio_dashboard.html
+     so it can be opened while diagnosing without perturbing a real session.
+============================================================================ -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CardioDrum Link Diagnostics</title>
+<style>
+  :root {
+    --bg:        #0e1116;
+    --panel:     #161b22;
+    --panel-2:   #1c2430;
+    --border:    #2a3441;
+    --text:      #e6edf3;
+    --muted:     #8b98a5;
+    --ok:        #3fb950;
+    --warn:      #d29922;
+    --err:       #f85149;
+    --accent:    #58a6ff;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  header {
+    display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+    padding: 14px 20px; border-bottom: 1px solid var(--border); background: var(--panel);
+    position: sticky; top: 0; z-index: 10;
+  }
+  h1 { font-size: 16px; margin: 0; font-weight: 600; letter-spacing: .2px; }
+  h1 span { color: var(--muted); font-weight: 400; }
+  .spacer { flex: 1; }
+  button {
+    background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 7px 14px; font-size: 13px; cursor: pointer;
+    font-family: inherit;
+  }
+  button:hover:not(:disabled) { border-color: var(--accent); }
+  button:disabled { opacity: .4; cursor: not-allowed; }
+  button.primary { background: var(--accent); color: #0b1220; border-color: var(--accent); font-weight: 600; }
+  button.danger  { border-color: var(--err); color: var(--err); }
+
+  .pill {
+    display: inline-flex; align-items: center; gap: 7px;
+    padding: 5px 12px; border-radius: 999px; font-size: 12px; font-weight: 600;
+    background: var(--panel-2); border: 1px solid var(--border);
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+  .dot.ok   { background: var(--ok);   box-shadow: 0 0 8px var(--ok); }
+  .dot.warn { background: var(--warn); }
+  .dot.err  { background: var(--err); }
+
+  main { padding: 18px 20px 60px; max-width: 1500px; margin: 0 auto; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(310px, 1fr)); gap: 14px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 9px; padding: 14px 16px;
+  }
+  .card h2 {
+    font-size: 11px; text-transform: uppercase; letter-spacing: .9px;
+    color: var(--muted); margin: 0 0 12px; font-weight: 600;
+  }
+
+  .stat-row { display: flex; justify-content: space-between; align-items: baseline; padding: 4px 0; }
+  .stat-row .k { color: var(--muted); font-size: 12px; }
+  .stat-row .v { font-family: var(--mono); font-size: 13px; }
+  .v.ok { color: var(--ok); } .v.warn { color: var(--warn); } .v.err { color: var(--err); }
+
+  .big { font-family: var(--mono); font-size: 26px; font-weight: 600; line-height: 1.1; }
+  .big-sub { color: var(--muted); font-size: 11px; margin-top: 2px; }
+  .bigs { display: flex; gap: 22px; flex-wrap: wrap; }
+
+  /* Verdict banner: the single most important output of this page. */
+  #verdict {
+    border-radius: 9px; padding: 13px 16px; margin-bottom: 14px;
+    border: 1px solid var(--border); background: var(--panel);
+    display: flex; gap: 12px; align-items: flex-start;
+  }
+  #verdict.rf     { border-color: var(--err);  background: #2a1416; }
+  #verdict.host   { border-color: var(--warn); background: #2a2413; }
+  #verdict.supply { border-color: var(--err);  background: #2a1416; }
+  #verdict.good   { border-color: var(--ok);   background: #12251a; }
+  #verdict .vi { font-size: 19px; line-height: 1.2; }
+  #verdict .vt { font-weight: 600; margin-bottom: 3px; }
+  #verdict .vd { color: var(--muted); font-size: 12.5px; }
+
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+  .rowline { display: flex; align-items: center; gap: 10px; }
+  .presets { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
+  .presets button { padding: 5px 11px; font-size: 12px; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  th {
+    text-align: left; color: var(--muted); font-weight: 600; font-size: 11px;
+    text-transform: uppercase; letter-spacing: .5px;
+    padding: 6px 8px; border-bottom: 1px solid var(--border); position: sticky; top: 0;
+    background: var(--panel);
+  }
+  td { padding: 6px 8px; border-bottom: 1px solid #1e2732; font-family: var(--mono); font-size: 12px; }
+  tr:last-child td { border-bottom: none; }
+  .tag { padding: 2px 7px; border-radius: 4px; font-size: 10.5px; font-weight: 700; letter-spacing: .3px; }
+  .tag.rf     { background: #4a1418; color: #ff9d96; }
+  .tag.host   { background: #3d3210; color: #f0c674; }
+  .tag.supply { background: #4a1418; color: #ff9d96; }
+  .tag.other  { background: #26303c; color: var(--muted); }
+
+  #log {
+    font-family: var(--mono); font-size: 11.5px; line-height: 1.55;
+    height: 230px; overflow-y: auto; background: #0b0f14;
+    border: 1px solid var(--border); border-radius: 7px; padding: 9px 11px;
+  }
+  #log div { white-space: pre-wrap; word-break: break-word; }
+  .l-ok { color: var(--ok); } .l-warn { color: var(--warn); }
+  .l-err { color: var(--err); } .l-dim { color: var(--muted); }
+
+  .scroll { max-height: 280px; overflow-y: auto; }
+  .empty { color: var(--muted); font-size: 12px; padding: 14px 4px; text-align: center; }
+  .hint { color: var(--muted); font-size: 11.5px; margin-top: 9px; line-height: 1.45; }
+  .rssi-wrap { display:flex; align-items:center; gap:8px; margin-top:8px; }
+  .bar { flex:1; height:7px; background: var(--panel-2); border-radius:4px; overflow:hidden; }
+  .bar > i { display:block; height:100%; width:0%; background: var(--ok); transition: width .3s, background .3s; }
+  code { font-family: var(--mono); background: var(--panel-2); padding: 1px 5px; border-radius: 3px; font-size: 11.5px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>CardioDrum <span>· Link Diagnostics</span></h1>
+  <div class="pill"><span class="dot" id="dot"></span><span id="state">disconnected</span></div>
+  <div class="pill" id="uptime-pill" style="display:none">session <span id="sess-time">0s</span></div>
+  <div class="spacer"></div>
+  <button class="primary" id="btn-connect">Connect</button>
+  <button id="btn-disconnect" disabled>Disconnect</button>
+  <button id="btn-reboot" disabled title="Software-reset the board (releases the brake first)">Reboot board</button>
+  <button id="btn-export" disabled>Export log</button>
+  <button id="btn-clear">Clear</button>
+</header>
+
+<main>
+  <div id="verdict">
+    <div class="vi">○</div>
+    <div>
+      <div class="vt">Not connected</div>
+      <div class="vd">Connect, then use the drum normally. Every drop is recorded and attributed to a cause.</div>
+    </div>
+  </div>
+
+  <div class="grid">
+
+    <!-- ── Link quality ─────────────────────────────────────────────────── -->
+    <div class="card">
+      <h2>Link quality</h2>
+      <div class="bigs">
+        <div>
+          <div class="big" id="m-rate">—</div>
+          <div class="big-sub">frames/s (expect 25)</div>
+        </div>
+        <div>
+          <div class="big" id="m-drops">0</div>
+          <div class="big-sub">drops this session</div>
+        </div>
+        <div>
+          <div class="big" id="m-gap">—</div>
+          <div class="big-sub">worst gap (ms)</div>
+        </div>
+      </div>
+      <div class="rssi-wrap" title="Frame delivery over the last 5 s — the practical stand-in for signal strength, which Web Bluetooth does not expose.">
+        <span style="color:var(--muted);font-size:11px;width:56px">delivery</span>
+        <div class="bar"><i id="bar-deliv"></i></div>
+        <span class="v" id="m-deliv" style="width:44px;text-align:right">—</span>
+      </div>
+      <div class="hint">
+        Web Bluetooth cannot read RSSI, so <em>delivered frame rate</em> is the range proxy:
+        it degrades before the link actually drops, which makes it the earliest warning you get.
+      </div>
+    </div>
+
+    <!-- ── Brake control ────────────────────────────────────────────────── -->
+    <div class="card">
+      <h2>Brake / resistance</h2>
+      <div class="rowline">
+        <input type="range" id="slider" min="0" max="100" value="0" disabled>
+        <span class="big" style="font-size:20px;min-width:52px;text-align:right"><span id="r-val">0</span>%</span>
+      </div>
+      <div class="presets">
+        <button data-r="0"   disabled>0</button>
+        <button data-r="25"  disabled>25</button>
+        <button data-r="50"  disabled>50</button>
+        <button data-r="75"  disabled>75</button>
+        <button data-r="100" disabled>100</button>
+        <button class="danger" id="btn-stop" disabled>STOP</button>
+      </div>
+      <div class="stat-row"><span class="k">firmware reports</span><span class="v" id="r-echo">—</span></div>
+      <div class="hint">
+        Load the brake while testing range. It is the largest current draw on the board,
+        so a marginal supply sags under it — a link that only fails <em>under load</em>
+        is a power problem, not an RF one.
+      </div>
+    </div>
+
+    <!-- ── Board / rail telemetry ───────────────────────────────────────── -->
+    <div class="card">
+      <h2>Board &amp; supply rail</h2>
+      <div class="stat-row"><span class="k">firmware</span><span class="v" id="s-fw">—</span></div>
+      <div class="stat-row"><span class="k">uptime</span><span class="v" id="s-up">—</span></div>
+      <div class="stat-row"><span class="k">free heap</span><span class="v" id="s-heap">—</span></div>
+      <div class="stat-row"><span class="k">this boot's reset</span><span class="v" id="s-rst">—</span></div>
+      <div class="stat-row"><span class="k">brownout resets</span><span class="v" id="s-bor">—</span></div>
+      <div class="stat-row"><span class="k">total resets</span><span class="v" id="s-rsts">—</span></div>
+      <div class="stat-row"><span class="k">brownout detector</span><span class="v" id="s-bod">—</span></div>
+      <div class="stat-row"><span class="k">I2C recoveries</span><span class="v" id="s-i2c">—</span></div>
+      <div class="hint" id="bod-hint"></div>
+    </div>
+
+    <!-- ── Host-side diagnostics ────────────────────────────────────────── -->
+    <div class="card">
+      <h2>Host (browser / OS)</h2>
+      <div class="stat-row"><span class="k">tab visible</span><span class="v" id="h-vis">—</span></div>
+      <div class="stat-row"><span class="k">visible all connection</span><span class="v" id="h-vthru">—</span></div>
+      <div class="stat-row"><span class="k">timer stalls</span><span class="v" id="h-stalls">—</span></div>
+      <div class="stat-row"><span class="k">worst stall</span><span class="v" id="h-worst">—</span></div>
+      <div class="stat-row"><span class="k">host-side drops</span><span class="v" id="h-hostdrops">—</span></div>
+      <div class="stat-row"><span class="k">mean time to drop</span><span class="v" id="h-mttd">—</span></div>
+      <div class="hint" id="h-hint">
+        A <code>0x16</code> drop with the tab visible and no timer stalls isolates the fault
+        <em>below</em> the browser — Windows Bluetooth power management or the adapter driver.
+      </div>
+    </div>
+
+    <!-- ── Firmware-side link counters ──────────────────────────────────── -->
+    <div class="card">
+      <h2>Firmware link counters</h2>
+      <div class="stat-row"><span class="k">connects (lifetime)</span><span class="v" id="s-conn">—</span></div>
+      <div class="stat-row"><span class="k">disconnects (lifetime)</span><span class="v" id="s-disc">—</span></div>
+      <div class="stat-row"><span class="k">last HCI reason</span><span class="v" id="s-dreason">—</span></div>
+      <div class="hint">
+        These are the board's own counters. If <code>disconnects</code> climbs while this page
+        shows no drop, the board is dropping links it never told us about — which points at the
+        peer dead-man timer or a reset, not at the browser.
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ── Drop log ───────────────────────────────────────────────────────── -->
+  <div class="card" style="margin-top:14px">
+    <h2>Disconnection log</h2>
+    <div class="scroll">
+      <table>
+        <thead>
+          <tr><th style="width:78px">time</th><th style="width:60px">alive</th><th style="width:84px">class</th>
+              <th style="width:52px">code</th><th>cause</th><th style="width:62px">brake</th>
+              <th style="width:74px">tab</th></tr>
+        </thead>
+        <tbody id="drops"></tbody>
+      </table>
+      <div class="empty" id="drops-empty">No disconnections recorded yet.</div>
+    </div>
+  </div>
+
+  <!-- ── Event log ──────────────────────────────────────────────────────── -->
+  <div class="card" style="margin-top:14px">
+    <h2>Event log</h2>
+    <div id="log"></div>
+  </div>
+</main>
+
+<script>
+'use strict';
+
+// ── Protocol (must match src/main.cpp) ───────────────────────────────────────
+const SERVICE_UUID = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
+const TX_UUID      = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';  // notify: esp -> app
+const RX_UUID      = '6e400002-b5a3-f393-e0a9-e50e24dcca9e';  // write:  app -> esp
+
+const KEEPALIVE_MS   = 3000;   // feeds the firmware's peer dead-man timer
+const STATUS_EVERY   = 4;      // every Nth keep-alive asks for a full [STATUS]
+const WATCHDOG_MS    = 2500;   // no frame for this long while "connected" = dead
+const WATCHDOG_TICK  = 500;
+const RATE_WINDOW_MS = 5000;   // sliding window for the delivered-rate metric
+const EXPECTED_HZ    = 25;     // firmware SAMPLE_PERIOD_MS = 40
+
+// ── HCI disconnect reasons ───────────────────────────────────────────────────
+// The classification (not the text) is the point: it routes you to the right
+// fix. Chasing antennas when the browser is hanging up wastes days.
+//   rf     -> genuine radio problem: range, interference, obstruction
+//   host   -> the browser/OS/our own code closed the link; RF work won't help
+//   supply -> the board rebooted underneath us; fix power, not radio
+const HCI = {
+  0x08: ['rf',    'Supervision timeout — no packets for the full timeout window',
+                  'Out of range, an obstruction (a body in the path), or 2.4 GHz interference.'],
+  0x13: ['host',  'Remote user terminated the connection',
+                  'The browser or OS closed the link deliberately. Not an RF fault.'],
+  0x16: ['host',  'Local host terminated the connection',
+                  'This page or the OS stack closed it — e.g. tab hidden, or our own teardown.'],
+  0x22: ['rf',    'LMP response timeout',
+                  'Link-layer stall; usually severe interference or a controller-level hiccup.'],
+  0x28: ['host',  'Instant passed',
+                  'A connection-update negotiation was missed. Usually a host stack quirk.'],
+  0x3B: ['host',  'Unacceptable connection parameters',
+                  'The central rejected the interval/timeout the firmware asked for.'],
+  0x3E: ['rf',    'Connection failed to be established',
+                  'The link never completed — a discovery/advertising problem rather than range.'],
+};
+function classify(code) {
+  const e = HCI[code];
+  if (e) return { cls: e[0], title: e[1], detail: e[2] };
+  return { cls: 'other', title: 'Unmapped HCI reason 0x' + hex(code),
+           detail: 'Not in the standard set this page knows about.' };
+}
+const hex = c => c.toString(16).toUpperCase().padStart(2, '0');
+
+// esp_reset_reason_t (esp_system.h). 6 = ESP_RST_BROWNOUT is the one that matters.
+const RESET_REASON = {
+  0:'unknown', 1:'power-on', 2:'external pin', 3:'software', 4:'panic/exception',
+  5:'interrupt watchdog', 6:'task watchdog', 7:'other watchdog', 8:'deep-sleep wake',
+  9:'BROWNOUT', 10:'SDIO', 11:'USB', 12:'JTAG', 13:'efuse error',
+  14:'power glitch', 15:'CPU lockup',
+};
+// ESP_RST_BROWNOUT is 9 and ESP_RST_PWR_GLITCH is 14 — both mean the supply
+// failed. Verified against esp_system.h, whose enum starts at ESP_RST_UNKNOWN=0;
+// an earlier version of this table was off by three and mislabelled 6 (task
+// watchdog) as a brownout, which would have blamed the power supply for a
+// firmware hang.
+const SUPPLY_RESETS = [9, 14];
+
+// ── State ────────────────────────────────────────────────────────────────────
+let device = null, server = null, txChar = null, rxChar = null;
+let connected = false;
+let userInitiated = false;         // distinguishes our own teardown from a real drop
+let keepAliveTimer = null, watchdogTimer = null, uiTimer = null;
+let keepAliveTick = 0;
+let rxBuf = '';
+const dec = new TextDecoder(), enc = new TextEncoder();
+
+let sessionStart = 0;
+let frameTimes = [];               // performance.now() of recent frames (rate window)
+let lastFrameAt = 0;
+let worstGapMs = 0;
+let dropCount = 0;
+const drops = [];                  // {wallClock, espUptime, code, cls, title, brake}
+let lastStatus = {};               // most recent parsed [STATUS]
+let currentBrake = 0;              // what WE last commanded (for drop attribution)
+let lastEspUptime = null;
+let sawFirstStatus = false;
+
+const $ = id => document.getElementById(id);
+
+// ── Logging ──────────────────────────────────────────────────────────────────
+function log(msg, cls) {
+  const el = $('log');
+  const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+  const d = document.createElement('div');
+  const t = new Date().toLocaleTimeString('en-GB', { hour12: false });
+  d.className = cls ? 'l-' + cls : '';
+  d.textContent = `[${t}] ${msg}`;
+  el.appendChild(d);
+  while (el.childElementCount > 600) el.removeChild(el.firstChild);
+  if (atBottom) el.scrollTop = el.scrollHeight;
+}
+
+function setState(s, cls) {
+  $('state').textContent = s;
+  $('dot').className = 'dot' + (cls ? ' ' + cls : '');
+}
+
+// ── Verdict banner ───────────────────────────────────────────────────────────
+// Summarises everything into one actionable sentence. Supply faults outrank RF
+// faults: a board that browns out was never transmitting at full power, so any
+// RF conclusion drawn while that is happening is unreliable.
+function updateVerdict() {
+  const v = $('verdict'), icon = v.querySelector('.vi'),
+        tt = v.querySelector('.vt'), dd = v.querySelector('.vd');
+
+  if (lastStatus.bor > 0) {
+    v.className = 'supply'; icon.textContent = '⚡';
+    tt.textContent = `Supply rail is sagging — ${lastStatus.bor} brownout reset(s)`;
+    dd.innerHTML = 'The board reset on a power dip. Its radio was <em>not</em> transmitting at the ' +
+                   'configured +9 dBm, so range conclusions are unreliable until this is fixed. ' +
+                   'Add bulk capacitance at the module, or use a better cable/supply.';
+    return;
+  }
+  if (!connected && dropCount === 0) {
+    v.className = ''; icon.textContent = '○';
+    tt.textContent = 'Not connected';
+    dd.textContent = 'Connect, then use the drum normally. Every drop is recorded and attributed.';
+    return;
+  }
+  const recent = drops.slice(-6);
+  const rf   = recent.filter(d => d.cls === 'rf').length;
+  const host = recent.filter(d => d.cls === 'host').length;
+
+  if (recent.length === 0) {
+    v.className = 'good'; icon.textContent = '✓';
+    tt.textContent = 'Link healthy — no drops recorded';
+    dd.textContent = 'Walk to the range where it used to fail, with the brake loaded, and watch this banner.';
+  } else if (rf > host) {
+    v.className = 'rf'; icon.textContent = '📡';
+    tt.textContent = `Radio-side failures (${rf} of the last ${recent.length} drops)`;
+    dd.innerHTML = 'Supervision timeouts mean the link genuinely lost packets. Next steps: confirm the ' +
+                   'supply rail under load, check for 2.4 GHz congestion, and check antenna placement ' +
+                   '(keep it clear of metal and of your body).';
+  } else if (host > 0) {
+    v.className = 'host'; icon.textContent = '💻';
+    tt.textContent = `Host-side failures (${host} of the last ${recent.length} drops)`;
+    // Name the specific suspect from the evidence rather than listing every
+    // possibility — the whole point of collecting host facts is to narrow it.
+    const hostRows = recent.filter(d => d.cls === 'host' && d.hostVerdict);
+    const verdicts = new Set(hostRows.map(d => d.hostVerdict));
+    let lead;
+    if (verdicts.has('tab-backgrounding')) {
+      lead = 'At least one drop happened with the tab hidden. Re-test with it visible — ' +
+             'background throttling has to be excluded before anything else can be trusted.';
+    } else if (verdicts.has('page-suspended')) {
+      lead = 'The page lost scheduling while visible: OS power saving or system load, ' +
+             'not Bluetooth. Check Windows power plan and background CPU load.';
+    } else if (verdicts.has('os-or-driver')) {
+      lead = 'Tab stayed visible and timers ran clean, yet the host cut the link. The fault is ' +
+             '<strong>below the browser</strong>: Device Manager → your Bluetooth adapter → ' +
+             'Power Management → uncheck "Allow the computer to turn off this device to save power". ' +
+             'A USB BT dongle is the fastest way to confirm.';
+    } else {
+      lead = 'The browser or OS is closing the link, not the radio.';
+    }
+    const pat = analyseLifetimePattern();
+    dd.innerHTML = '<em>No amount of RF tuning will help.</em> ' + lead +
+                   (pat ? '<br><br>' + pat : '');
+  } else {
+    v.className = ''; icon.textContent = '•';
+    tt.textContent = `${recent.length} drop(s) with no clear pattern`;
+    dd.textContent = 'Keep testing — the classification sharpens with more samples.';
+  }
+}
+
+// ── Connect / disconnect ─────────────────────────────────────────────────────
+async function connect() {
+  if (!navigator.bluetooth) { log('Web Bluetooth unavailable — use Chrome or Edge over https/localhost.', 'err'); return; }
+  try {
+    userInitiated = false;
+    log('Requesting device…');
+    // NAME-ONLY filter. The Nordic UART UUID is shared by every NUS device, and
+    // other boards on this bench advertise it too (an "Aroleapx2" unit was seen
+    // on the same UUID). Filtering by UUID would list them, and they connect
+    // fine and then stream nothing — which looks exactly like a flaky link.
+    device = await navigator.bluetooth.requestDevice({
+      filters: [{ namePrefix: 'CardioDrum' }],
+      optionalServices: [SERVICE_UUID],
+    });
+    log(`Selected: ${device.name || '(unnamed)'} [${device.id.slice(0, 12)}…]`);
+    device.addEventListener('gattserverdisconnected', onGattDisconnected);
+    await establish();
+  } catch (e) {
+    if (e && e.name === 'NotFoundError') log('No device chosen.', 'dim');
+    else log('Connect failed: ' + (e && e.message ? e.message : e), 'err');
+    setState('disconnected');
+  }
+}
+
+async function establish() {
+  setState('connecting', 'warn');
+  log('Connecting GATT…');
+  server = await device.gatt.connect();
+  const svc = await server.getPrimaryService(SERVICE_UUID);
+  txChar = await svc.getCharacteristic(TX_UUID);
+  rxChar = await svc.getCharacteristic(RX_UUID);
+  await txChar.startNotifications();
+  txChar.removeEventListener('characteristicvaluechanged', onNotify);
+  txChar.addEventListener('characteristicvaluechanged', onNotify);
+
+  connected = true;
+  sessionStart = performance.now();
+  lastFrameAt = performance.now();
+  frameTimes = []; worstGapMs = 0; rxBuf = '';
+  // Per-connection host facts. visibleThroughout is sticky for the life of ONE
+  // connection: a tab that was hidden even briefly cannot later claim it was
+  // visible the whole time, which is exactly the alibi we need to test.
+  hostFacts.connectAt = performance.now();
+  hostFacts.visibleThroughout = !document.hidden;
+  hostFacts.wakeGaps = [];
+  setState('connected', 'ok');
+  setControlsEnabled(true);
+  log('Connected — streaming.', 'ok');
+
+  startKeepAlive();
+  startWatchdog();
+  writeCmd('S', true);              // pull a [STATUS] immediately
+  updateVerdict();
+}
+
+// Raised by the browser on a real drop AND by our own disconnect(). The
+// userInitiated flag is what keeps a deliberate teardown out of the drop log —
+// without it, every manual disconnect would pollute the statistics.
+function onGattDisconnected() {
+  if (!connected) return;
+  connected = false;
+  stopKeepAlive(); stopWatchdog();
+  setControlsEnabled(false);
+  setState('disconnected');
+
+  if (userInitiated) {
+    log('Disconnected (by you).', 'dim');
+    userInitiated = false;
+  } else {
+    recordDrop('browser reported disconnect');
+  }
+  updateVerdict();
+}
+
+function disconnect() {
+  userInitiated = true;
+  try { if (device && device.gatt.connected) device.gatt.disconnect(); }
+  catch (_) {}
+  // If the browser never fires the event, force the teardown ourselves.
+  setTimeout(() => { if (connected) onGattDisconnected(); }, 300);
+}
+
+// ── Host-side forensics ──────────────────────────────────────────────────────
+// HCI 0x16 ("local host terminated") means the WINDOWS/Chrome side closed the
+// link, not the radio. That is a conclusion about the host, so it needs host
+// evidence — otherwise "the browser did it" is just a guess with a hex code
+// attached. These probes capture what the page can actually observe about its
+// own environment at the moment of a drop.
+//
+// The three realistic causes of an unprompted 0x16, in order of likelihood:
+//   1. USB selective suspend / "allow the computer to turn off this device" on
+//      the Bluetooth radio — Windows powers the adapter down under its own
+//      policy and every link dies with it.
+//   2. Timer throttling in a hidden/occluded tab starving our keep-alive.
+//   3. A Chrome GATT-layer timeout or driver stall.
+// We can distinguish (2) directly, and gather strong circumstantial evidence
+// for (1) by timing: selective suspend fires on an idle-timer, so its drops
+// cluster at a repeatable interval after connect.
+
+const hostFacts = {
+  visibleThroughout: true,     // was the tab visible for the WHOLE connection?
+  hiddenCount: 0,              // times it went hidden while connected
+  lastHiddenAt: null,
+  wakeGaps: [],                // detected timer stalls (ms) — the throttling signature
+  connectAt: 0,                // performance.now() at the last successful connect
+  lifetimes: [],               // seconds each connection survived
+};
+
+// Timer-stall detector. A visible, healthy tab fires this on schedule; a
+// throttled or suspended one shows a gap far larger than the interval. This is
+// the direct test for "was the browser starving our keep-alive?" — if the gaps
+// stay small and the link still dies, throttling is EXONERATED and the cause is
+// below the browser (OS radio power management or the driver).
+const HEARTBEAT_MS = 1000;
+let lastHeartbeat = performance.now();
+setInterval(() => {
+  const now = performance.now();
+  const gap = now - lastHeartbeat;
+  lastHeartbeat = now;
+  // >2.5x the interval means we genuinely lost scheduling time.
+  if (gap > HEARTBEAT_MS * 2.5) {
+    hostFacts.wakeGaps.push(Math.round(gap));
+    log(`Timer stall: ${Math.round(gap)}ms with no scheduling (expected ~${HEARTBEAT_MS}ms). ` +
+        `The browser suspended this page — that alone can kill the link.`, 'warn');
+  }
+}, HEARTBEAT_MS);
+
+// Snapshot of everything host-side we know, taken at drop time.
+function hostSnapshot() {
+  const now = performance.now();
+  return {
+    tabVisible: !document.hidden,
+    visibilityState: document.visibilityState,
+    hasFocus: document.hasFocus(),
+    visibleThroughout: hostFacts.visibleThroughout,
+    hiddenCount: hostFacts.hiddenCount,
+    timerStalls: hostFacts.wakeGaps.length,
+    worstStallMs: hostFacts.wakeGaps.length ? Math.max(...hostFacts.wakeGaps) : 0,
+    connectionAgeS: hostFacts.connectAt ? +((now - hostFacts.connectAt) / 1000).toFixed(1) : null,
+  };
+}
+
+// Interpret a 0x16 (or an unexplained browser disconnect) using the host facts.
+// The point is to NAME the suspect, not to restate that the host did it.
+function explainHostDrop(snap) {
+  if (!snap.visibleThroughout || !snap.tabVisible) {
+    return { verdict: 'tab-backgrounding',
+             text: 'The tab was hidden during this connection. Browsers throttle timers in ' +
+                   'background tabs, which starves the keep-alive. Keep this tab visible.' };
+  }
+  if (snap.timerStalls > 0) {
+    return { verdict: 'page-suspended',
+             text: `The page lost scheduling (worst stall ${snap.worstStallMs}ms) while visible — ` +
+                   'likely OS-level power saving or heavy system load, not Bluetooth itself.' };
+  }
+  // Tab visible, timers healthy, link still cut by the host: that isolates the
+  // fault to the OS Bluetooth stack or the adapter driver.
+  return { verdict: 'os-or-driver',
+           text: 'Tab stayed visible and timers ran normally, yet the host still closed the link. ' +
+                 'That points BELOW the browser: Windows Bluetooth power management or the adapter ' +
+                 'driver. Check Device Manager → Bluetooth adapter → Power Management → uncheck ' +
+                 '"Allow the computer to turn off this device to save power".' };
+}
+
+// If host-terminated drops cluster at a repeatable connection age, that is the
+// fingerprint of an idle/suspend timer rather than anything random.
+function analyseLifetimePattern() {
+  const L = hostFacts.lifetimes;
+  if (L.length < 3) return null;
+  const recent = L.slice(-6);
+  const mean = recent.reduce((a, b) => a + b, 0) / recent.length;
+  const spread = Math.max(...recent) - Math.min(...recent);
+  // Tight clustering around a consistent value = a timer, not chance.
+  if (spread <= Math.max(4, mean * 0.35)) {
+    return `Drops cluster around ${mean.toFixed(0)}s after connect (spread ${spread.toFixed(0)}s). ` +
+           'A repeatable interval is the signature of an idle/suspend TIMER, not interference. ' +
+           'Suspect USB selective suspend on the Bluetooth adapter.';
+  }
+  return null;
+}
+
+// ── Drop recording ───────────────────────────────────────────────────────────
+// A drop is recorded with whatever we knew at the moment it happened. The HCI
+// code comes from the LAST [STATUS] we received — the board cannot tell us the
+// reason for a drop while the link is down, so the code is confirmed on the
+// next reconnect and the row is upgraded then.
+function recordDrop(note) {
+  dropCount++;
+  const code = typeof lastStatus.dreason === 'number' ? lastStatus.dreason : null;
+  const info = code ? classify(code) : { cls: 'other', title: note, detail: '' };
+  const snap = hostSnapshot();
+  if (snap.connectionAgeS != null) hostFacts.lifetimes.push(snap.connectionAgeS);
+  const row = {
+    wall: new Date().toLocaleTimeString('en-GB', { hour12: false }),
+    esp: lastStatus.up != null ? lastStatus.up + 's' : '—',
+    code, cls: info.cls, title: info.title, detail: info.detail,
+    brake: currentBrake,
+    pending: code === null,        // awaiting confirmation on reconnect
+    host: snap,                    // host-side conditions at the moment of the drop
+    aliveS: snap.connectionAgeS,
+  };
+  drops.push(row);
+  renderDrops();
+  log(`DROP #${dropCount} — ${info.title}${code ? ' (0x' + hex(code) + ')' : ''} · brake ${currentBrake}%` +
+      (snap.connectionAgeS != null ? ` · alive ${snap.connectionAgeS}s` : ''),
+      info.cls === 'host' ? 'warn' : 'err');
+  if (info.detail) log('   ↳ ' + info.detail, 'dim');
+
+  // For a host-side drop, the generic hint is not enough — say WHICH host cause
+  // the evidence supports, and state plainly what it rules out.
+  if (info.cls === 'host' || code === null) {
+    const h = explainHostDrop(snap);
+    log(`   ↳ host evidence: tab ${snap.tabVisible ? 'VISIBLE' : 'HIDDEN'}` +
+        `, focus ${snap.hasFocus ? 'yes' : 'no'}` +
+        `, timer stalls ${snap.timerStalls}` +
+        (snap.worstStallMs ? ` (worst ${snap.worstStallMs}ms)` : ''), 'dim');
+    log(`   ↳ ${h.verdict}: ${h.text}`, 'warn');
+    row.hostVerdict = h.verdict;
+    const pattern = analyseLifetimePattern();
+    if (pattern) log('   ↳ ' + pattern, 'warn');
+  }
+  $('m-drops').textContent = dropCount;
+}
+
+function renderDrops() {
+  const tb = $('drops');
+  tb.innerHTML = '';
+  $('drops-empty').style.display = drops.length ? 'none' : 'block';
+  // Newest first: when you are testing, the drop you just caused is the one you
+  // want to read, and scrolling to the bottom of a long table to find it is
+  // exactly the wrong ergonomics mid-experiment.
+  for (const d of [...drops].reverse()) {
+    const tr = document.createElement('tr');
+    const tab = d.host
+      ? (d.host.visibleThroughout ? 'visible' : 'hidden')
+      : '—';
+    tr.innerHTML =
+      `<td>${d.wall}</td>` +
+      `<td>${d.aliveS != null ? d.aliveS + 's' : '—'}</td>` +
+      `<td><span class="tag ${d.cls}">${d.cls.toUpperCase()}</span></td>` +
+      `<td>${d.code != null ? '0x' + hex(d.code) : '—'}</td>` +
+      `<td style="font-family:inherit">${d.title}${d.pending ? ' <span style="color:var(--muted)">(unconfirmed)</span>' : ''}</td>` +
+      `<td>${d.brake}%</td>` +
+      `<td style="color:${tab === 'hidden' ? 'var(--warn)' : 'var(--muted)'}">${tab}</td>`;
+    tb.appendChild(tr);
+  }
+}
+
+// ── Notifications ────────────────────────────────────────────────────────────
+function onNotify(ev) {
+  const dv = ev.target.value;
+  const now = performance.now();
+
+  // A data frame is EXACTLY 16 bytes; every text line is longer. Length alone is
+  // an unambiguous discriminator — do NOT also test byte 0, which is the low
+  // byte of the millisecond timestamp and is '[' for ~1 frame in 256.
+  if (dv.byteLength === 16) {
+    // Keep-alive backstop: setInterval is throttled in a hidden/occluded tab,
+    // but incoming notifies are not. Driving the heartbeat off the data stream
+    // too means the firmware's dead-man can never fire while frames flow.
+    if (connected && now - lastKeepAliveAt >= KEEPALIVE_MS) sendKeepAlive();
+    const gap = now - lastFrameAt;
+    if (lastFrameAt && gap > worstGapMs) worstGapMs = gap;
+    lastFrameAt = now;
+    frameTimes.push(now);
+    const cutoff = now - RATE_WINDOW_MS;
+    while (frameTimes.length && frameTimes[0] < cutoff) frameTimes.shift();
+
+    const r = Math.round(dv.getFloat32(12, true));
+    $('r-echo').textContent = r + '%';
+    return;
+  }
+
+  rxBuf += dec.decode(dv);
+  let nl;
+  while ((nl = rxBuf.indexOf('\n')) >= 0) {
+    const line = rxBuf.slice(0, nl).trim();
+    rxBuf = rxBuf.slice(nl + 1);
+    if (line) handleLine(line);
+  }
+}
+
+function handleLine(line) {
+  if (line.startsWith('[STATUS]')) {
+    try { handleStatus(JSON.parse(line.slice(8).trim())); }
+    catch (_) { log('Bad STATUS JSON: ' + line.slice(0, 90), 'err'); }
+    return;
+  }
+  if (line.startsWith('[INFO]')) { log('esp: ' + line.slice(6).trim(), 'dim'); return; }
+  log('esp: ' + line, 'dim');
+}
+
+function handleStatus(s) {
+  const prev = lastStatus;
+  lastStatus = s;
+
+  $('s-fw').textContent   = s.fw || '—';
+  $('s-up').textContent   = s.up != null ? fmtUptime(s.up) : '—';
+  $('s-heap').textContent = s.heap != null ? Math.round(s.heap / 1024) + ' KB' : '—';
+  $('s-conn').textContent = s.conn ?? '—';
+  $('s-disc').textContent = s.disc ?? '—';
+  $('s-i2c').textContent  = s.i2crec ?? '—';
+
+  if (typeof s.dreason === 'number') {
+    const el = $('s-dreason');
+    if (s.dreason === 0) { el.textContent = 'none'; el.className = 'v'; }
+    else {
+      const info = classify(s.dreason);
+      el.textContent = '0x' + hex(s.dreason) + ' ' + info.cls;
+      el.className = 'v ' + (info.cls === 'host' ? 'warn' : 'err');
+    }
+  }
+
+  // ---- rail telemetry (firmware >= 1.2) ----
+  if (typeof s.rst === 'number') {
+    const el = $('s-rst');
+    const name = RESET_REASON[s.rst] || ('code ' + s.rst);
+    el.textContent = `${name} (${s.rst})`;
+    el.className = 'v ' + (SUPPLY_RESETS.includes(s.rst) ? 'err' : 'ok');
+  }
+  if (typeof s.bor === 'number') {
+    const el = $('s-bor');
+    el.textContent = s.bor;
+    el.className = 'v ' + (s.bor > 0 ? 'err' : 'ok');
+  }
+  if (typeof s.rsts === 'number') $('s-rsts').textContent = s.rsts;
+  if (typeof s.bod === 'number') {
+    const el = $('s-bod');
+    el.textContent = s.bod ? 'armed' : 'disabled';
+    el.className = 'v ' + (s.bod ? 'ok' : 'warn');
+    $('bod-hint').innerHTML = s.bod
+      ? 'Detector is armed, so the brownout count above is trustworthy.'
+      : 'Detector is <strong>disabled</strong>, so a brownout count of 0 proves nothing. ' +
+        'Set <code>BROWNOUT_DETECT_ENABLE 1</code> in config.h to actually verify the rail.';
+  }
+
+  // A board reboot mid-session is NOT a BLE problem, but it presents as one:
+  // the device vanishes and re-advertises. Catching it here is the whole reason
+  // the rail counters exist.
+  if (lastEspUptime !== null && s.up != null && s.up + 2 < lastEspUptime) {
+    const why = RESET_REASON[s.rst] || 'unknown';
+    log(`Board REBOOTED (uptime ${lastEspUptime}s → ${s.up}s, reset: ${why}). ` +
+        `This is a device reset, not a link drop.`, 'err');
+    if (SUPPLY_RESETS.includes(s.rst)) {
+      log('   ↳ Reset cause was BROWNOUT — the supply sagged. Fix power before chasing RF.', 'err');
+    }
+  }
+  if (s.up != null) lastEspUptime = s.up;
+
+  if (typeof s.bor === 'number' && prev.bor != null && s.bor > prev.bor) {
+    log(`Brownout count rose ${prev.bor} → ${s.bor} — the rail sagged just now.`, 'err');
+  }
+
+  // Confirm the cause of the most recent unconfirmed drop, now that the board
+  // can finally tell us why it happened.
+  if (!sawFirstStatus) { sawFirstStatus = true; }
+  const pend = [...drops].reverse().find(d => d.pending);
+  if (pend && typeof s.dreason === 'number' && s.dreason !== 0) {
+    const info = classify(s.dreason);
+    pend.code = s.dreason; pend.cls = info.cls; pend.title = info.title; pend.pending = false;
+    renderDrops();
+    log(`Drop cause confirmed by board: 0x${hex(s.dreason)} — ${info.title}`,
+        info.cls === 'host' ? 'warn' : 'err');
+  }
+
+  // Keep the slider in step with the board unless the user is dragging it.
+  if (typeof s.r === 'number' && !draggingSlider) {
+    $('slider').value = s.r;
+    $('r-val').textContent = s.r;
+    currentBrake = s.r;
+  }
+  updateVerdict();
+}
+
+const fmtUptime = s => s < 60 ? s + 's'
+                   : s < 3600 ? Math.floor(s / 60) + 'm ' + (s % 60) + 's'
+                   : Math.floor(s / 3600) + 'h ' + Math.floor((s % 3600) / 60) + 'm';
+
+// ── Commands ─────────────────────────────────────────────────────────────────
+async function writeCmd(cmd, silent) {
+  if (!rxChar) { if (!silent) log('Not connected', 'warn'); return; }
+  try {
+    const data = enc.encode(cmd + '\n');
+    // writeValueWithoutResponse avoids a round-trip ACK per command; the
+    // firmware's RX path does not need one.
+    if (rxChar.writeValueWithoutResponse) await rxChar.writeValueWithoutResponse(data);
+    else await rxChar.writeValue(data);
+    if (!silent) log('→ ' + cmd, 'dim');
+  } catch (e) {
+    if (!silent) log('Write failed: ' + (e && e.message ? e.message : e), 'err');
+  }
+}
+
+let lastKeepAliveAt = 0;
+
+// PING is answered with nothing; it exists to feed the firmware's peer dead-man
+// timer and to give the OS stack bidirectional traffic. Every 4th one asks for a
+// full [STATUS] instead, which is how the rail counters and the drop reason
+// reach this page. Self-throttling so the timer and the frame-driven backstop
+// below can both call it without doubling up.
+function sendKeepAlive() {
+  if (!connected) return;
+  const now = performance.now();
+  if (now - lastKeepAliveAt < KEEPALIVE_MS * 0.8) return;
+  lastKeepAliveAt = now;
+  keepAliveTick++;
+  writeCmd(keepAliveTick % STATUS_EVERY === 0 ? 'S' : 'PING', true);
+}
+
+function startKeepAlive() {
+  stopKeepAlive();
+  keepAliveTick = 0;
+  lastKeepAliveAt = performance.now();
+  keepAliveTimer = setInterval(sendKeepAlive, KEEPALIVE_MS);
+}
+function stopKeepAlive() { if (keepAliveTimer) clearInterval(keepAliveTimer); keepAliveTimer = null; }
+
+// The browser sometimes fires gattserverdisconnected late, or not at all. A
+// frame gap this long while nominally connected means the link is dead
+// regardless of what the browser believes.
+function startWatchdog() {
+  stopWatchdog();
+  watchdogTimer = setInterval(() => {
+    if (!connected) return;
+    if (performance.now() - lastFrameAt > WATCHDOG_MS) {
+      log(`No frames for ${(WATCHDOG_MS / 1000).toFixed(1)}s — treating the link as dead.`, 'err');
+      stopWatchdog();
+      userInitiated = false;
+      try { if (device && device.gatt.connected) device.gatt.disconnect(); } catch (_) {}
+      onGattDisconnected();
+    }
+  }, WATCHDOG_TICK);
+}
+function stopWatchdog() { if (watchdogTimer) clearInterval(watchdogTimer); watchdogTimer = null; }
+
+// ── UI metrics tick ──────────────────────────────────────────────────────────
+setInterval(() => {
+  if (connected) {
+    $('uptime-pill').style.display = '';
+    $('sess-time').textContent = fmtUptime(Math.floor((performance.now() - sessionStart) / 1000));
+  }
+  const now = performance.now();
+  const cutoff = now - RATE_WINDOW_MS;
+  while (frameTimes.length && frameTimes[0] < cutoff) frameTimes.shift();
+
+  if (connected && frameTimes.length > 1) {
+    const span = (now - Math.max(frameTimes[0], cutoff)) / 1000;
+    const hz = span > 0.5 ? frameTimes.length / span : 0;
+    $('m-rate').textContent = hz.toFixed(1);
+    const pct = Math.max(0, Math.min(100, (hz / EXPECTED_HZ) * 100));
+    $('bar-deliv').style.width = pct + '%';
+    $('bar-deliv').style.background = pct > 85 ? 'var(--ok)' : pct > 55 ? 'var(--warn)' : 'var(--err)';
+    $('m-deliv').textContent = Math.round(pct) + '%';
+    $('m-deliv').className = 'v ' + (pct > 85 ? 'ok' : pct > 55 ? 'warn' : 'err');
+  } else if (!connected) {
+    $('m-rate').textContent = '—';
+    $('bar-deliv').style.width = '0%';
+    $('m-deliv').textContent = '—';
+    $('m-deliv').className = 'v';
+  }
+  $('m-gap').textContent = worstGapMs ? Math.round(worstGapMs) : '—';
+
+  // Host panel
+  $('h-vis').textContent = document.hidden ? 'no' : 'yes';
+  $('h-vis').className = 'v ' + (document.hidden ? 'warn' : 'ok');
+  if (connected) {
+    $('h-vthru').textContent = hostFacts.visibleThroughout ? 'yes' : 'no';
+    $('h-vthru').className = 'v ' + (hostFacts.visibleThroughout ? 'ok' : 'warn');
+  }
+  $('h-stalls').textContent = hostFacts.wakeGaps.length;
+  $('h-stalls').className = 'v ' + (hostFacts.wakeGaps.length ? 'warn' : 'ok');
+  $('h-worst').textContent = hostFacts.wakeGaps.length ? Math.max(...hostFacts.wakeGaps) + ' ms' : '—';
+  const hostDrops = drops.filter(d => d.cls === 'host');
+  $('h-hostdrops').textContent = hostDrops.length + ' of ' + drops.length;
+  $('h-hostdrops').className = 'v ' + (hostDrops.length ? 'warn' : '');
+  const L = hostFacts.lifetimes;
+  if (L.length) {
+    const mean = L.reduce((a, b) => a + b, 0) / L.length;
+    $('h-mttd').textContent = mean.toFixed(1) + ' s';
+  }
+}, 500);
+
+// ── Controls ─────────────────────────────────────────────────────────────────
+let draggingSlider = false;
+let lastSliderSend = 0;
+
+function setControlsEnabled(on) {
+  $('btn-disconnect').disabled = !on;
+  $('btn-reboot').disabled = !on;
+  $('btn-stop').disabled = !on;
+  $('slider').disabled = !on;
+  document.querySelectorAll('.presets button[data-r]').forEach(b => b.disabled = !on);
+  $('btn-connect').disabled = on;
+  $('btn-export').disabled = drops.length === 0 && !on;
+}
+
+$('slider').addEventListener('input', e => {
+  draggingSlider = true;
+  const v = parseInt(e.target.value, 10);
+  $('r-val').textContent = v;
+  // Throttle: a slider drag fires far faster than the link should be asked to
+  // carry commands, and flooding it is itself a way to cause drops.
+  const now = performance.now();
+  if (now - lastSliderSend >= 120) { lastSliderSend = now; currentBrake = v; writeCmd('R:' + v, true); }
+});
+function sliderRelease() {
+  if (!draggingSlider) return;
+  draggingSlider = false;
+  const v = parseInt($('slider').value, 10);
+  currentBrake = v;
+  writeCmd('R:' + v);
+}
+$('slider').addEventListener('change', sliderRelease);
+$('slider').addEventListener('pointerup', sliderRelease);
+$('slider').addEventListener('pointercancel', sliderRelease);
+
+document.querySelectorAll('.presets button[data-r]').forEach(b => {
+  b.addEventListener('click', () => {
+    const v = parseInt(b.dataset.r, 10);
+    $('slider').value = v; $('r-val').textContent = v; currentBrake = v;
+    writeCmd('R:' + v);
+  });
+});
+
+$('btn-stop').addEventListener('click', () => {
+  $('slider').value = 0; $('r-val').textContent = '0'; currentBrake = 0;
+  writeCmd('STOP');
+});
+
+$('btn-connect').addEventListener('click', connect);
+$('btn-disconnect').addEventListener('click', disconnect);
+
+$('btn-reboot').addEventListener('click', () => {
+  if (!confirm('Software-reset the board?\n\nThe brake is released first. The link will drop and this ' +
+               'will be logged as a deliberate disconnect, not a fault.')) return;
+  log('Rebooting board…', 'warn');
+  userInitiated = true;              // our own doing: keep it out of the drop stats
+  writeCmd('REBOOT');
+});
+
+$('btn-clear').addEventListener('click', () => {
+  drops.length = 0; dropCount = 0; worstGapMs = 0;
+  $('m-drops').textContent = '0';
+  $('log').innerHTML = '';
+  renderDrops(); updateVerdict();
+  log('Cleared.', 'dim');
+});
+
+// Export everything needed to reconstruct a session offline.
+$('btn-export').addEventListener('click', () => {
+  const payload = {
+    exported: new Date().toISOString(),
+    userAgent: navigator.userAgent,
+    device: device ? { name: device.name, id: device.id } : null,
+    summary: {
+      drops: dropCount,
+      worstGapMs: Math.round(worstGapMs),
+      byClass: drops.reduce((a, d) => (a[d.cls] = (a[d.cls] || 0) + 1, a), {}),
+    },
+    lastStatus,
+    hostFacts: {
+      hiddenCount: hostFacts.hiddenCount,
+      timerStalls: hostFacts.wakeGaps,
+      connectionLifetimesS: hostFacts.lifetimes,
+      lifetimePattern: analyseLifetimePattern(),
+    },
+    drops,
+    log: [...$('log').children].map(d => d.textContent),
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `cardiodrum-diag-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+  log('Exported diagnostics.', 'ok');
+});
+
+// A hidden tab gets its timers throttled, which can itself cause a drop and
+// then be misread as an RF fault. Say so in the log rather than letting it
+// silently corrupt the data.
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    hostFacts.hiddenCount++;
+    hostFacts.visibleThroughout = false;   // sticky for this connection
+    hostFacts.lastHiddenAt = performance.now();
+    if (connected) {
+      log('Tab hidden — the browser throttles timers here and may drop the link. ' +
+          'Any drop from now on cannot be blamed on the OS with confidence.', 'warn');
+    }
+  } else if (hostFacts.lastHiddenAt) {
+    const away = Math.round(performance.now() - hostFacts.lastHiddenAt);
+    log(`Tab visible again after ${away}ms hidden.`, 'dim');
+  }
+});
+
+window.addEventListener('beforeunload', () => {
+  if (connected) { userInitiated = true; try { device.gatt.disconnect(); } catch (_) {} }
+});
+
+setControlsEnabled(false);
+renderDrops();
+log('Ready. Connect, load the brake, then walk to where the link used to fail.', 'dim');
+if (!navigator.bluetooth) log('Web Bluetooth not available in this browser.', 'err');
+</script>
+</body>
+</html>
