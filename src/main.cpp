@@ -329,6 +329,10 @@ static void serialPrintf(const char *fmt, ...) {
 // Returns true if the sample is trustworthy. On a sustained failure the bus is
 // re-initialised — a loose connector or a sensor-rail glitch then recovers on
 // its own instead of leaving the device streaming a frozen position forever.
+// Forward declaration: recoverI2C() reports over BLE as well as Serial, but
+// sendLine() is defined further down with the other BLE helpers.
+static void sendLine(const char *s);
+
 static void recoverI2C() {
     // This does ~50-155 ms of blocking work (Wire.end/begin plus AS5600 re-init
     // with a bounded-but-slow bus). Feed the watchdog first so a recovery can
@@ -343,7 +347,14 @@ static void recoverI2C() {
     as5600.setDirection(AS5600_CLOCK_WISE);
     lastRaw       = 0xFFFF;      // re-seed; don't fabricate a delta across the gap
     i2cFailCount  = 0;
-    serialPrintf("[INFO] I2C bus recovered (#%lu)\n", (unsigned long)i2cRecoveries);
+    {
+        // Also over BLE: a loose encoder connector otherwise reaches the
+        // dashboard only as frozen position data, with no hint of the cause.
+        char m[72];
+        snprintf(m, sizeof(m), "[INFO] I2CRECOVER bus re-initialised (#%lu)",
+                 (unsigned long)i2cRecoveries);
+        sendLine(m);
+    }
 }
 
 // ---- BLE send helpers ------------------------------------------------------
@@ -1014,13 +1025,22 @@ void loop() {
         if (deviceConnected && ageMs >= (int32_t)BLE_PEER_TIMEOUT_MS) {
             if (!peerSilent) {              // edge-triggered: act once per silence
                 peerSilent = true;
-                serialPrintf("[INFO] peer silent for %ld ms - releasing brake (link left up)\n",
-                             (long)ageMs);
+                // sendLine(), not serialPrintf(): this must reach the DASHBOARD.
+                // A brake released under the rider is the most important event
+                // the firmware can report, and during a range test nobody is
+                // watching a USB cable.
+                char m[96];
+                snprintf(m, sizeof(m),
+                         "[INFO] DEADMAN peer silent %ld ms - brake released (link left up)",
+                         (long)ageMs);
+                sendLine(m);
                 scaleResistance(0);         // SAFETY (we ARE loop(); direct is fine)
             }
         } else if (peerSilent && ageMs < (int32_t)BLE_PEER_TIMEOUT_MS) {
             peerSilent = false;             // peer spoke again - re-arm
-            serialPrintf("[INFO] peer alive again (age %ld ms)\n", (long)ageMs);
+            char m2[64];
+            snprintf(m2, sizeof(m2), "[INFO] DEADMAN cleared (peer age %ld ms)", (long)ageMs);
+            sendLine(m2);
         }
     }
 

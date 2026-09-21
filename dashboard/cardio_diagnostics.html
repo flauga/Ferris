@@ -124,6 +124,11 @@
   .tag.host   { background: #3d3210; color: #f0c674; }
   .tag.supply { background: #4a1418; color: #ff9d96; }
   .tag.other  { background: #26303c; color: var(--muted); }
+  .tag.sev-critical { background: #4a1418; color: #ff9d96; }
+  .tag.sev-major    { background: #3d3210; color: #f0c674; }
+  .tag.sev-minor    { background: #26303c; color: var(--muted); }
+  .nr { background:#1d2a38; color:#7fb2e5; padding:1px 5px; border-radius:3px;
+        font-size:9.5px; font-weight:700; letter-spacing:.3px; }
 
   #log {
     font-family: var(--mono); font-size: 11.5px; line-height: 1.55;
@@ -263,6 +268,26 @@
 
   </div>
 
+  <!-- ── Detected faults ─────────────────────────────────────────────────── -->
+  <div class="card" style="margin-top:14px">
+    <h2>Detected faults</h2>
+    <div class="scroll">
+      <table>
+        <thead>
+          <tr><th style="width:78px">severity</th><th>fault</th><th style="width:44px">n</th>
+              <th style="width:74px">last</th><th style="width:34%">detail</th></tr>
+        </thead>
+        <tbody id="faults"></tbody>
+      </table>
+      <div class="empty" id="faults-empty">No faults detected.</div>
+    </div>
+    <div class="hint">
+      <span class="nr">NOT-RANGE</span> marks faults that look like a range problem in a normal
+      dashboard but are not. Only <strong>supervision timeout</strong> and
+      <strong>frame-rate collapse</strong> are genuine RF evidence.
+    </div>
+  </div>
+
   <!-- ── Drop log ───────────────────────────────────────────────────────── -->
   <div class="card" style="margin-top:14px">
     <h2>Disconnection log</h2>
@@ -364,6 +389,14 @@ let lastStatus = {};               // most recent parsed [STATUS]
 let currentBrake = 0;              // what WE last commanded (for drop attribution)
 let lastEspUptime = null;
 let sawFirstStatus = false;
+let lastSeenRst = null;      // so a reset fault is raised once per boot
+let lastPos = null;          // encoder-freeze detector
+let samePosCount = 0;
+let starvationSince = 0;     // when the frame rate first went bad
+// When we last RECEIVED a [STATUS]. Notifies flowing while status replies dry
+// up means our upstream writes are not landing — the exact condition that lets
+// the board's dead-man fire while the link looks perfectly healthy from here.
+let lastStatusAt = 0;
 
 const $ = id => document.getElementById(id);
 
@@ -392,6 +425,21 @@ function setState(s, cls) {
 function updateVerdict() {
   const v = $('verdict'), icon = v.querySelector('.vi'),
         tt = v.querySelector('.vt'), dd = v.querySelector('.vd');
+
+  // A critical fault outranks everything else, because a board that rebooted,
+  // browned out or hit the dead-man was not running a fair RF test at all —
+  // any range conclusion drawn over the top of one is worthless.
+  const crit = [...faults.values()]
+    .filter(f => FAULTS[f.key].sev === 'critical' && FAULTS[f.key].notRange)
+    .sort((a, b) => b.last - a.last)[0];
+  if (crit && !(lastStatus.bor > 0)) {
+    const def = FAULTS[crit.key];
+    v.className = 'supply'; icon.textContent = '⛔';
+    tt.textContent = def.label + (crit.count > 1 ? ` (x${crit.count})` : '');
+    dd.innerHTML = def.why + '<br><br><strong>This is not a range problem.</strong> ' +
+                   'Fix it before drawing any conclusion about RF.';
+    return;
+  }
 
   if (lastStatus.bor > 0) {
     v.className = 'supply'; icon.textContent = '⚡';
@@ -496,6 +544,7 @@ async function establish() {
   // connection: a tab that was hidden even briefly cannot later claim it was
   // visible the whole time, which is exactly the alibi we need to test.
   hostFacts.connectAt = performance.now();
+  lastStatusAt = performance.now();
   hostFacts.visibleThroughout = !document.hidden;
   hostFacts.wakeGaps = [];
   setState('connected', 'ok');
@@ -533,6 +582,134 @@ function disconnect() {
   catch (_) {}
   // If the browser never fires the event, force the teardown ourselves.
   setTimeout(() => { if (connected) onGattDisconnected(); }, 300);
+}
+
+// ── Fault registry ──────────────────────────────────────────────────────
+// Every failure mode this project has actually produced, each with the signal
+// that distinguishes it. Several are INDISTINGUISHABLE from "bad range" at the
+// UI level - that confusion cost weeks - so each entry records what it is NOT
+// as well as what it is.
+//
+// sev: critical (session-ending or unsafe) | major | minor
+const FAULTS = {
+  DEADMAN_FIRED: {
+    sev: "critical", label: "Peer dead-man fired - brake released", notRange: true,
+    why: "The firmware heard nothing from this page for the timeout window and released " +
+         "the brake as a safety measure. If it fired while this page was plainly alive, " +
+         "the keep-alive is not reaching the board." },
+  DEADMAN_UNDERFLOW: {
+    sev: "critical", label: "Dead-man UNDERFLOW (the 4294967295 bug)", notRange: true,
+    why: "A reported silence near 2^32 ms means an unsigned millis() delta wrapped. This " +
+         "is the bug that masqueraded as bad range: it kills healthy links at random " +
+         "intervals. Fixed in firmware 1.3 - seeing this means an older build is flashed." },
+  BOARD_REBOOT: {
+    sev: "critical", label: "Board rebooted mid-session", notRange: true,
+    why: "Uptime went backwards. The device vanished and re-advertised, which looks " +
+         "exactly like a link drop but is not one. The reset reason separates brownout " +
+         "from watchdog from panic." },
+  BROWNOUT: {
+    sev: "critical", label: "Brownout - supply rail collapsed", notRange: true,
+    why: "The 3.3V rail sagged below the detector threshold. The radio was NOT " +
+         "transmitting at its configured power, so any range conclusion drawn now is " +
+         "unreliable." },
+  WATCHDOG_RESET: {
+    sev: "critical", label: "Watchdog reset - loop() wedged", notRange: true,
+    why: "The task watchdog rebooted the board because loop() stopped feeding it. Usually " +
+         "a blocked I2C transaction or a blocking Serial write." },
+  PANIC_RESET: {
+    sev: "critical", label: "Panic / exception reset", notRange: true,
+    why: "The firmware crashed. Read the serial backtrace - this is a code defect, not RF." },
+  I2C_RECOVERY: {
+    sev: "major", label: "I2C bus recovered - encoder glitch", notRange: true,
+    why: "The AS5600 stopped responding and the bus was re-initialised. A loose encoder " +
+         "connector shows up here; position data around this moment is not trustworthy." },
+  RF_TIMEOUT: {
+    sev: "critical", label: "Supervision timeout - genuine RF loss", notRange: false,
+    why: "Neither side heard the other for the whole supervision window. THIS is what a " +
+         "real range or interference failure looks like. Most other entries here are not." },
+  FAILED_ESTABLISH: {
+    sev: "major", label: "Connection failed to establish", notRange: false,
+    why: "The link never completed. Points at advertising or discovery, not distance." },
+  HOST_TERMINATED: {
+    sev: "major", label: "Host closed the link", notRange: true,
+    why: "The browser, the OS Bluetooth stack, or the board itself deliberately hung up. " +
+         "The host evidence panel tells which." },
+  FRAME_STARVATION: {
+    sev: "major", label: "Frame rate collapsed", notRange: false,
+    why: "Frames are arriving far below 25 Hz while the link is still up. A smooth decline " +
+         "with distance is RF; a sharp onset is loop() stalling." },
+  FRAME_GAP: {
+    sev: "minor", label: "Frame gap", notRange: false,
+    why: "A stall in the data stream that did not kill the link. Clusters of these are the " +
+         "earliest warning that range is running out." },
+  STALE_POSITION: {
+    sev: "major", label: "Encoder position frozen", notRange: true,
+    why: "Position has not changed across many frames. Expected with no magnet fitted; " +
+         "otherwise suspect the encoder or its wiring." },
+  TAB_HIDDEN: {
+    sev: "major", label: "Tab hidden while connected", notRange: true,
+    why: "Browsers throttle timers in background tabs, starving the keep-alive and " +
+         "tripping the board dead-man. Any drop from here on is inconclusive." },
+  TIMER_STALL: {
+    sev: "major", label: "Page lost scheduling", notRange: true,
+    why: "The page was suspended while visible - OS power saving or heavy system load. It " +
+         "starves the keep-alive exactly like backgrounding does." },
+  CMD_FAILED: {
+    sev: "major", label: "Command write failed", notRange: false,
+    why: "A write to the board threw. The GATT link is degraded even if not yet closed." },
+  WRONG_DEVICE: {
+    sev: "critical", label: "Connected to the wrong device", notRange: true,
+    why: "The peer speaks Nordic UART but is not a CardioDrum - other boards share this " +
+         "UUID. It connects fine and streams nothing, which looks exactly like a dead link." },
+  STATUS_STALE: {
+    sev: "minor", label: "No STATUS response", notRange: false,
+    why: "The board has not answered a status request recently. Upstream writes may not be " +
+         "reaching it even though notifies still flow." },
+};
+
+// Everything observed this session, keyed by fault id.
+const faults = new Map();
+
+function raise(key, detail) {
+  const def = FAULTS[key];
+  if (!def) return;
+  const now = Date.now();
+  const prev = faults.get(key);
+  if (prev) {
+    prev.count++; prev.last = now; if (detail) prev.detail = detail;
+  } else {
+    faults.set(key, { key, first: now, last: now, count: 1, detail: detail || "" });
+    // Log only the FIRST occurrence: a repeating fault must not flood the log
+    // and bury the one-off that actually explains the session.
+    const cls = def.sev === "critical" ? "err" : def.sev === "major" ? "warn" : "dim";
+    log("FAULT  " + def.label + (detail ? " - " + detail : ""), cls);
+    log("   > " + def.why, "dim");
+  }
+  renderFaults();
+}
+
+const SEV_ORDER = { critical: 0, major: 1, minor: 2 };
+
+function renderFaults() {
+  const tb = $("faults");
+  if (!tb) return;
+  tb.innerHTML = "";
+  $("faults-empty").style.display = faults.size ? "none" : "block";
+  const rows = [...faults.values()].sort((a, b) =>
+    SEV_ORDER[FAULTS[a.key].sev] - SEV_ORDER[FAULTS[b.key].sev] || b.last - a.last);
+  for (const f of rows) {
+    const def = FAULTS[f.key];
+    const tr = document.createElement("tr");
+    tr.innerHTML =
+      '<td><span class="tag sev-' + def.sev + '">' + def.sev.toUpperCase() + "</span></td>" +
+      '<td style="font-family:inherit">' + def.label +
+        (def.notRange ? ' <span class="nr">NOT-RANGE</span>' : "") + "</td>" +
+      "<td>" + f.count + "</td>" +
+      '<td style="color:var(--muted)">' +
+        new Date(f.last).toLocaleTimeString("en-GB", { hour12: false }) + "</td>" +
+      '<td style="font-family:inherit;color:var(--muted)">' + (f.detail || "") + "</td>";
+    tb.appendChild(tr);
+  }
 }
 
 // ── Host-side forensics ──────────────────────────────────────────────────────
@@ -575,6 +752,7 @@ setInterval(() => {
   // >2.5x the interval means we genuinely lost scheduling time.
   if (gap > HEARTBEAT_MS * 2.5) {
     hostFacts.wakeGaps.push(Math.round(gap));
+    raise('TIMER_STALL', Math.round(gap) + ' ms without scheduling');
     log(`Timer stall: ${Math.round(gap)}ms with no scheduling (expected ~${HEARTBEAT_MS}ms). ` +
         `The browser suspended this page — that alone can kill the link.`, 'warn');
   }
@@ -654,6 +832,12 @@ function recordDrop(note) {
     host: snap,                    // host-side conditions at the moment of the drop
     aliveS: snap.connectionAgeS,
   };
+  // Map the HCI code onto a named fault so the fault table tells the whole
+  // story without the drop log having to be read alongside it.
+  if (code === 0x08 || code === 0x22)      raise('RF_TIMEOUT', '0x' + hex(code));
+  else if (code === 0x3E)                  raise('FAILED_ESTABLISH', '0x3E');
+  else if (info.cls === 'host')            raise('HOST_TERMINATED', '0x' + hex(code));
+
   drops.push(row);
   renderDrops();
   log(`DROP #${dropCount} — ${info.title}${code ? ' (0x' + hex(code) + ')' : ''} · brake ${currentBrake}%` +
@@ -721,6 +905,17 @@ function onNotify(ev) {
     const cutoff = now - RATE_WINDOW_MS;
     while (frameTimes.length && frameTimes[0] < cutoff) frameTimes.shift();
 
+    // Frame gap: a stall that did not kill the link. 200 ms is 5x the nominal
+    // 40 ms period, so ordinary jitter never trips it.
+    if (lastFrameAt && gap > 200) raise('FRAME_GAP', Math.round(gap) + ' ms');
+
+    const pos = dv.getInt32(8, true);
+    if (pos === lastPos) {
+      if (++samePosCount === 250) raise('STALE_POSITION', '250 frames at pos ' + pos);
+    } else {
+      samePosCount = 0; lastPos = pos;
+    }
+
     const r = Math.round(dv.getFloat32(12, true));
     $('r-echo').textContent = r + '%';
     return;
@@ -741,11 +936,41 @@ function handleLine(line) {
     catch (_) { log('Bad STATUS JSON: ' + line.slice(0, 90), 'err'); }
     return;
   }
-  if (line.startsWith('[INFO]')) { log('esp: ' + line.slice(6).trim(), 'dim'); return; }
+  if (line.startsWith('[INFO]')) {
+    const body = line.slice(6).trim();
+    // The firmware tags its important events so they can be machine-matched
+    // here rather than guessed at from prose.
+    // Match BOTH the tagged 1.3+ form ("DEADMAN peer silent <n> ms") and the
+    // legacy 1.2 form ("peer silent for <n> ms"), so this page still diagnoses
+    // a board that has not been reflashed yet — which is exactly the board most
+    // likely to be exhibiting the underflow.
+    if (body.startsWith('DEADMAN peer silent') || body.startsWith('peer silent for')) {
+      const ms = parseInt((body.match(/silent (?:for )?(\d+) ms/) || [])[1], 10);
+      // A silence anywhere near 2^32 ms is the unsigned-underflow bug, not a
+      // real silence. Naming it matters: the generic dead-man message would
+      // otherwise send you hunting a keep-alive problem that does not exist.
+      if (Number.isFinite(ms) && ms > 4000000000) {
+        raise('DEADMAN_UNDERFLOW', ms + ' ms reported - firmware predates the 1.3 fix');
+      } else {
+        raise('DEADMAN_FIRED', Number.isFinite(ms) ? ms + ' ms of silence' : body);
+      }
+      log('esp: ' + body, 'err');
+      return;
+    }
+    if (body.startsWith('DEADMAN cleared')) { log('esp: ' + body, 'ok'); return; }
+    if (body.startsWith('I2CRECOVER') || body.startsWith('I2C bus recovered')) {
+      raise('I2C_RECOVERY', body.replace(/^(I2CRECOVER|I2C bus recovered)/, '').trim());
+      log('esp: ' + body, 'warn');
+      return;
+    }
+    log('esp: ' + body, 'dim');
+    return;
+  }
   log('esp: ' + line, 'dim');
 }
 
 function handleStatus(s) {
+  lastStatusAt = performance.now();
   const prev = lastStatus;
   lastStatus = s;
 
@@ -789,6 +1014,22 @@ function handleStatus(s) {
         'Set <code>BROWNOUT_DETECT_ENABLE 1</code> in config.h to actually verify the rail.';
   }
 
+  // Reset-reason faults, raised once per new boot rather than per status line.
+  if (typeof s.rst === 'number' && s.rst !== lastSeenRst) {
+    lastSeenRst = s.rst;
+    if (SUPPLY_RESETS.includes(s.rst))      raise('BROWNOUT', 'reset reason ' + s.rst);
+    else if (s.rst === 4)                   raise('PANIC_RESET', 'reset reason 4');
+    else if (s.rst === 5 || s.rst === 6 || s.rst === 7)
+                                            raise('WATCHDOG_RESET', RESET_REASON[s.rst]);
+  }
+  if (typeof s.bor === 'number' && s.bor > 0) {
+    raise('BROWNOUT', s.bor + ' brownout reset(s) since power-on');
+  }
+  // Guard against talking to some other Nordic-UART device entirely.
+  if (s.name && s.name !== 'CardioDrum') {
+    raise('WRONG_DEVICE', 'peer reports name "' + s.name + '"');
+  }
+
   // A board reboot mid-session is NOT a BLE problem, but it presents as one:
   // the device vanishes and re-advertises. Catching it here is the whole reason
   // the rail counters exist.
@@ -796,6 +1037,7 @@ function handleStatus(s) {
     const why = RESET_REASON[s.rst] || 'unknown';
     log(`Board REBOOTED (uptime ${lastEspUptime}s → ${s.up}s, reset: ${why}). ` +
         `This is a device reset, not a link drop.`, 'err');
+    raise('BOARD_REBOOT', `uptime ${lastEspUptime}s → ${s.up}s, reset: ${why}`);
     if (SUPPLY_RESETS.includes(s.rst)) {
       log('   ↳ Reset cause was BROWNOUT — the supply sagged. Fix power before chasing RF.', 'err');
     }
@@ -842,6 +1084,10 @@ async function writeCmd(cmd, silent) {
     else await rxChar.writeValue(data);
     if (!silent) log('→ ' + cmd, 'dim');
   } catch (e) {
+    // Raise even for silent (keep-alive) writes: a failing keep-alive is
+    // precisely what trips the board's dead-man, and staying quiet about it
+    // would hide the cause of the drop that follows.
+    raise('CMD_FAILED', cmd + ': ' + (e && e.message ? e.message : e));
     if (!silent) log('Write failed: ' + (e && e.message ? e.message : e), 'err');
   }
 }
@@ -907,6 +1153,22 @@ setInterval(() => {
     $('bar-deliv').style.background = pct > 85 ? 'var(--ok)' : pct > 55 ? 'var(--warn)' : 'var(--err)';
     $('m-deliv').textContent = Math.round(pct) + '%';
     $('m-deliv').className = 'v ' + (pct > 85 ? 'ok' : pct > 55 ? 'warn' : 'err');
+    // Sustained starvation only — a brief dip is normal and already covered by
+    // FRAME_GAP. Require 3 s below half rate before calling it a fault.
+    if (pct < 50) {
+      if (!starvationSince) starvationSince = now;
+      else if (now - starvationSince > 3000) {
+        raise('FRAME_STARVATION', hz.toFixed(1) + ' Hz (expected ' + EXPECTED_HZ + ')');
+        starvationSince = now;   // re-arm so it can re-raise if it persists
+      }
+    } else starvationSince = 0;
+
+    // Status silence while frames still arrive = upstream writes not landing.
+    const statusDue = KEEPALIVE_MS * STATUS_EVERY * 3;
+    if (lastStatusAt && now - lastStatusAt > statusDue) {
+      raise('STATUS_STALE', Math.round((now - lastStatusAt) / 1000) + ' s since last STATUS');
+      lastStatusAt = now;      // re-arm rather than re-raising every tick
+    }
   } else if (!connected) {
     $('m-rate').textContent = '—';
     $('bar-deliv').style.width = '0%';
@@ -995,6 +1257,8 @@ $('btn-reboot').addEventListener('click', () => {
 
 $('btn-clear').addEventListener('click', () => {
   drops.length = 0; dropCount = 0; worstGapMs = 0;
+  faults.clear(); renderFaults();
+  lastSeenRst = null; samePosCount = 0; starvationSince = 0;
   $('m-drops').textContent = '0';
   $('log').innerHTML = '';
   renderDrops(); updateVerdict();
@@ -1013,6 +1277,11 @@ $('btn-export').addEventListener('click', () => {
       byClass: drops.reduce((a, d) => (a[d.cls] = (a[d.cls] || 0) + 1, a), {}),
     },
     lastStatus,
+    faults: [...faults.values()].map(f => ({
+      key: f.key, severity: FAULTS[f.key].sev, label: FAULTS[f.key].label,
+      notRange: FAULTS[f.key].notRange, count: f.count, detail: f.detail,
+      first: new Date(f.first).toISOString(), last: new Date(f.last).toISOString(),
+    })),
     hostFacts: {
       hiddenCount: hostFacts.hiddenCount,
       timerStalls: hostFacts.wakeGaps,
@@ -1042,6 +1311,7 @@ document.addEventListener('visibilitychange', () => {
     if (connected) {
       log('Tab hidden — the browser throttles timers here and may drop the link. ' +
           'Any drop from now on cannot be blamed on the OS with confidence.', 'warn');
+      raise('TAB_HIDDEN', 'hidden while connected');
     }
   } else if (hostFacts.lastHiddenAt) {
     const away = Math.round(performance.now() - hostFacts.lastHiddenAt);
@@ -1055,6 +1325,7 @@ window.addEventListener('beforeunload', () => {
 
 setControlsEnabled(false);
 renderDrops();
+renderFaults();
 log('Ready. Connect, load the brake, then walk to where the link used to fail.', 'dim');
 if (!navigator.bluetooth) log('Web Bluetooth not available in this browser.', 'err');
 </script>
