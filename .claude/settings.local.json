@@ -4,7 +4,9 @@
       "Bash(gh auth *)",
       "Bash(git --version)",
       "Bash(git init *)",
-      "Bash(git add *)"
+      "Bash(git add *)",
+      "Bash(git commit -q -m ' *)",
+      "Bash(gh repo *)"
     ]
   }
 }
