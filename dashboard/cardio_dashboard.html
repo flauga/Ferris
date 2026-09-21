@@ -129,6 +129,30 @@ input[type=range]:disabled { opacity: .4; }
   box-shadow: 0 0 6px rgba(251,191,36,.5); transition: width .2s linear; }
 .workout-info { font-size: 11px; color: var(--text3); font-family: var(--mono); line-height: 1.6; }
 
+/* Cadence threshold sliders */
+.thresh-box { margin: 12px 0 10px; padding: 11px 13px; background: var(--bg3);
+              border: 1px solid var(--border); border-radius: var(--r); }
+.thresh-head { display: flex; align-items: center; justify-content: space-between;
+               font-size: 11px; font-weight: 500; letter-spacing: .07em;
+               text-transform: uppercase; color: var(--text3); margin-bottom: 9px; }
+.thresh-reset { font-size: 10px; padding: 2px 8px; border-radius: 4px; text-transform: none;
+                letter-spacing: 0; background: var(--bg4); color: var(--text2); }
+.thresh-row { display: flex; align-items: center; gap: 11px; margin-bottom: 7px; }
+.thresh-row label { font-size: 11px; color: var(--text2); width: 42px; flex-shrink: 0; }
+.thresh-row input[type=range] { flex: 1; height: 5px; }
+/* Distinct thumbs: the two sliders sit adjacent and must not be confused. */
+#thresh-low::-webkit-slider-thumb  { background: var(--red);   box-shadow: 0 0 6px rgba(248,113,113,.6); }
+#thresh-low::-moz-range-thumb      { background: var(--red); }
+#thresh-high::-webkit-slider-thumb { background: var(--green); box-shadow: 0 0 6px rgba(74,222,128,.6); }
+#thresh-high::-moz-range-thumb     { background: var(--green); }
+.thresh-val { font-family: var(--mono); font-size: 12px; color: var(--text);
+              width: 60px; text-align: right; flex-shrink: 0; }
+.thresh-legend { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 9px;
+                 font-size: 10.5px; color: var(--text3); font-family: var(--mono); }
+.thresh-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.thresh-legend i { width: 8px; height: 8px; border-radius: 2px; display: inline-block; }
+.thresh-legend b { color: var(--text2); font-weight: 500; }
+
 .log { background: var(--bg); border: 1px solid var(--border); border-radius: var(--r);
        height: 110px; overflow-y: auto; padding: 6px 10px; font-family: var(--mono); font-size: 11px; color: var(--text3); }
 .log-line { padding: 1px 0; }
@@ -190,7 +214,32 @@ input[type=range]:disabled { opacity: .4; }
       <span id="workout-timer" style="font-size:12px;color:var(--text3);font-family:var(--mono);margin-left:6px"></span>
     </div>
     <div class="workout-progress"><div class="workout-progress-bar" id="workout-load-bar"></div></div>
-    <div class="workout-info" id="workout-info">Holds at 10 % until your first pull, then the load continuously adapts to your cadence (averaged over a 3 s window): below 60 rpm it decreases rapidly, between 60–80 rpm it increases slowly, and above 80 rpm it increases rapidly — clamped to a 10 % floor and 100 % ceiling. The bar above shows the current load. End the workout to download the CSV.</div>
+
+    <!-- Cadence thresholds. Live-editable, including mid-workout: a rider who
+         finds the band wrong wants to fix it now, not restart the session. -->
+    <div class="thresh-box">
+      <div class="thresh-head">
+        <span>Cadence band</span>
+        <button id="btn-thresh-reset" class="thresh-reset" title="Restore 60 / 80 rpm">reset</button>
+      </div>
+      <div class="thresh-row">
+        <label for="thresh-low">Lower</label>
+        <input type="range" id="thresh-low" min="20" max="160" step="1" value="60">
+        <span class="thresh-val"><span id="thresh-low-val">60</span> rpm</span>
+      </div>
+      <div class="thresh-row">
+        <label for="thresh-high">Upper</label>
+        <input type="range" id="thresh-high" min="20" max="160" step="1" value="80">
+        <span class="thresh-val"><span id="thresh-high-val">80</span> rpm</span>
+      </div>
+      <div class="thresh-legend">
+        <span><i style="background:var(--red)"></i>&lt; <b id="tl-a">60</b> rapid&nbsp;↓</span>
+        <span><i style="background:var(--amber)"></i><b id="tl-b">60</b>–<b id="tl-c">80</b> slow&nbsp;↑</span>
+        <span><i style="background:var(--green)"></i>&gt; <b id="tl-d">80</b> rapid&nbsp;↑</span>
+      </div>
+    </div>
+
+    <div class="workout-info" id="workout-info"></div>
   </div>
 
   <div class="card">
@@ -282,17 +331,7 @@ input[type=range]:disabled { opacity: .4; }
   </div>
   <div class="card">
     <div class="card-title">Auto workout logic</div>
-    <p style="font-size:12px;color:var(--text2);line-height:1.8">
-      Arm the workout, then start pulling the rope. Resistance holds at <strong>10 %</strong> until your
-      first pull, after which the load <strong>continuously adapts to your cadence</strong>, averaged over a
-      single rolling <strong>3 s</strong> window: below <strong>60 rpm</strong> the load
-      <strong>decreases rapidly</strong>, between <strong>60–80 rpm</strong> it <strong>increases slowly</strong>,
-      and above <strong>80 rpm</strong> it <strong>increases rapidly</strong> — always clamped to a 10 % floor
-      and 100 % ceiling. There is no fixed time-based ramp: how fast the load climbs is entirely driven by how
-      fast you pedal. The rapid rate is ~0.75 %/s (the slow rate is gentler). All thresholds, the window
-      length, and both rates are editable constants at the top of the page script. Every sample is logged;
-      end the workout to auto-download the CSV.
-    </p>
+    <p id="workout-logic-prose" style="font-size:12px;color:var(--text2);line-height:1.8"></p>
   </div>
 </div>
 
@@ -333,8 +372,17 @@ const WK_TICK_MS     = 200;     // how often the load is recomputed + the brake 
 //     avg > WK_RPM_HIGH                 → increase rapidly   (+WK_RATE_RAPID)
 // The load is clamped to [WK_MIN_HOLD_PCT, WK_PEAK_PCT] and re-commanded every tick,
 // so it moves smoothly at the active rate rather than in visible steps.
-const WK_RPM_LOW        = 60;    // lower cadence threshold (rpm)
-const WK_RPM_HIGH       = 80;    // upper cadence threshold (rpm)
+// The two cadence thresholds are USER-ADJUSTABLE at runtime (sliders in the
+// Auto Workout card), so they are `let`, not `const`. Everything that consumes
+// them must read them live rather than capturing a copy at load time — see
+// applyCadenceThresholds(), which also refreshes the chart's guide lines and
+// y-axis. The values below are the defaults used when nothing is stored.
+let WK_RPM_LOW          = 60;    // lower cadence threshold (rpm)
+let WK_RPM_HIGH         = 80;    // upper cadence threshold (rpm)
+const WK_RPM_MIN_SEP    = 5;     // keep LOW at least this far below HIGH
+const WK_RPM_SLIDER_MIN = 20;    // slider bounds; wide enough for any rider
+const WK_RPM_SLIDER_MAX = 160;
+const WK_THRESH_STORE   = 'cardiodrum.cadenceThresholds';
 const WK_HOLD_WINDOW_MS = 3000;  // single averaging window for the cadence check
 // "Rapid" defaults to the old ramp rate (10 %→100 % over 2 min ≈ 0.75 %/s).
 const WK_RATE_RAPID     = (WK_PEAK_PCT - WK_START_PCT) / 90;  // %/s — 0.75; edit freely
@@ -704,9 +752,126 @@ const cadenceChart = new Chart($('cadenceChart'), {
 });
 
 // Reflect the configured thresholds + averaging window into the legend labels.
-$('cad-high').textContent = WK_RPM_HIGH;
-$('cad-low').textContent  = WK_RPM_LOW;
 $('cad-avg-lbl').textContent = '(' + (CAD_AVG_MS / 1000) + ' s avg)';
+
+// ── Cadence thresholds: single point of truth ───────────────────────────────
+// Every consumer of WK_RPM_LOW/HIGH is refreshed from here, so a threshold can
+// never be changed in one place and left stale in another. Called on load, on
+// every slider input, and on reset.
+//
+// Deliberately allowed MID-WORKOUT: a rider who finds the band wrong wants it
+// fixed now, not after restarting. monitorHoldCadence() reads the globals when
+// its window closes, so a change takes effect on the next window with no extra
+// plumbing.
+function applyCadenceThresholds(low, high, opts = {}) {
+  // Clamp to the slider range, then enforce the separation. Whichever slider
+  // the rider is dragging wins, so pushing one past the other shoves the other
+  // along instead of snapping the dragged one back under the hand.
+  low  = Math.round(Math.min(Math.max(low,  WK_RPM_SLIDER_MIN), WK_RPM_SLIDER_MAX));
+  high = Math.round(Math.min(Math.max(high, WK_RPM_SLIDER_MIN), WK_RPM_SLIDER_MAX));
+  if (high - low < WK_RPM_MIN_SEP) {
+    if (opts.moved === 'high') low  = Math.max(WK_RPM_SLIDER_MIN, high - WK_RPM_MIN_SEP);
+    else                       high = Math.min(WK_RPM_SLIDER_MAX, low  + WK_RPM_MIN_SEP);
+    // If clamping at a rail made the separation impossible, fix the other end.
+    if (high - low < WK_RPM_MIN_SEP) {
+      if (high >= WK_RPM_SLIDER_MAX) low  = high - WK_RPM_MIN_SEP;
+      else                           high = low  + WK_RPM_MIN_SEP;
+    }
+  }
+
+  WK_RPM_LOW  = low;
+  WK_RPM_HIGH = high;
+
+  // Sliders (may differ from the values after clamping).
+  $('thresh-low').value       = low;
+  $('thresh-high').value      = high;
+  $('thresh-low-val').textContent  = low;
+  $('thresh-high-val').textContent = high;
+
+  // Inline legend under the sliders.
+  $('tl-a').textContent = low;
+  $('tl-b').textContent = low;
+  $('tl-c').textContent = high;
+  $('tl-d').textContent = high;
+
+  // Cadence chart legend + guide lines. The already-plotted history is rewritten
+  // too: the lines mark "the band you are being judged against", and leaving a
+  // stale segment on screen would misrepresent the rules the load is following.
+  $('cad-high').textContent = high;
+  $('cad-low').textContent  = low;
+  for (let i = 0; i < cadHigh.length; i++) cadHigh[i] = high;
+  for (let i = 0; i < cadLow.length;  i++) cadLow[i]  = low;
+  // Guarded because this also runs from initCadenceThresholds(), which fires
+  // right after the chart is constructed — but keep the guard so reordering
+  // the script can never turn this into a hard error.
+  if (typeof cadenceChart !== 'undefined' && cadenceChart) {
+    cadenceChart.options.scales.y.max = high + CAD_Y_HEADROOM;
+    cadenceChart.update('none');
+  }
+
+  // The two prose descriptions, so they can never contradict the sliders.
+  updateWorkoutProse();
+
+  if (!opts.silent) {
+    try { localStorage.setItem(WK_THRESH_STORE, JSON.stringify({ low, high })); }
+    catch (_) { /* private mode / blocked storage: settings just won't persist */ }
+  }
+}
+
+// Both descriptions are generated, not hardcoded. They previously stated
+// "60 rpm" and "80 rpm" as literal text, which would silently lie the moment
+// the sliders moved.
+function updateWorkoutProse() {
+  const lo = WK_RPM_LOW, hi = WK_RPM_HIGH, win = WK_HOLD_WINDOW_MS / 1000;
+  const el = $('workout-info');
+  if (el) {
+    el.textContent =
+      `Holds at ${WK_START_PCT} % until your first pull, then the load continuously adapts to your ` +
+      `cadence (averaged over a ${win} s window): below ${lo} rpm it decreases rapidly, between ` +
+      `${lo}–${hi} rpm it increases slowly, and above ${hi} rpm it increases rapidly — clamped to a ` +
+      `${WK_MIN_HOLD_PCT} % floor and ${WK_PEAK_PCT} % ceiling. The bar above shows the current load. ` +
+      `End the workout to download the CSV.`;
+  }
+  const el2 = $('workout-logic-prose');
+  if (el2) {
+    el2.innerHTML =
+      `Arm the workout, then start pulling the rope. Resistance holds at <strong>${WK_START_PCT} %</strong> ` +
+      `until your first pull, after which the load <strong>continuously adapts to your cadence</strong>, ` +
+      `averaged over a single rolling <strong>${win} s</strong> window: below <strong>${lo} rpm</strong> ` +
+      `the load <strong>decreases rapidly</strong>, between <strong>${lo}–${hi} rpm</strong> it ` +
+      `<strong>increases slowly</strong>, and above <strong>${hi} rpm</strong> it ` +
+      `<strong>increases rapidly</strong> — always clamped to a ${WK_MIN_HOLD_PCT} % floor and ` +
+      `${WK_PEAK_PCT} % ceiling. There is no fixed time-based ramp: how fast the load climbs is entirely ` +
+      `driven by how fast you pedal. The rapid rate is ~${WK_RATE_RAPID.toFixed(2)} %/s and the slow rate ` +
+      `is ${WK_RATE_SLOW} %/s. The cadence thresholds are set with the sliders in the Auto Workout card ` +
+      `and persist across reloads; the window length and both rates are constants at the top of the page ` +
+      `script. Every sample is logged; end the workout to auto-download the CSV.`;
+  }
+}
+
+// Restore saved thresholds, falling back to the defaults. Wrapped because
+// localStorage throws in some privacy modes rather than returning null.
+(function initCadenceThresholds() {
+  let lo = WK_RPM_LOW, hi = WK_RPM_HIGH;
+  try {
+    const raw = localStorage.getItem(WK_THRESH_STORE);
+    if (raw) {
+      const v = JSON.parse(raw);
+      if (Number.isFinite(v.low) && Number.isFinite(v.high)) { lo = v.low; hi = v.high; }
+    }
+  } catch (_) { /* fall through to defaults */ }
+  // silent: restoring is not a user edit, so do not write it straight back.
+  applyCadenceThresholds(lo, hi, { silent: true });
+})();
+
+$('thresh-low').addEventListener('input', () =>
+  applyCadenceThresholds(+$('thresh-low').value, WK_RPM_HIGH, { moved: 'low' }));
+$('thresh-high').addEventListener('input', () =>
+  applyCadenceThresholds(WK_RPM_LOW, +$('thresh-high').value, { moved: 'high' }));
+$('btn-thresh-reset').addEventListener('click', () => {
+  applyCadenceThresholds(60, 80);
+  log('Cadence band reset to 60 / 80 rpm');
+});
 
 // Dashboard-side rolling average for the plotted RPM. We sample liveRpm every
 // animation frame into a timestamped ring and average everything within the last
@@ -1102,6 +1267,13 @@ function endWorkout(download) {
     log('Saved WITH a data-quality warning (' + why.join(', ') +
         ') — treat these numbers with caution', 'warn');
   }
+  // Record the cadence band this session ran under. Now that the thresholds
+  // are user-adjustable, a bare CSV is ambiguous: the same rows mean different
+  // things at 60/80 than at 45/95, and two sessions are only comparable if the
+  // band is known. Cheap to write, impossible to reconstruct later.
+  header += `# cadence band: low=${WK_RPM_LOW} rpm high=${WK_RPM_HIGH} rpm ` +
+            `window=${WK_HOLD_WINDOW_MS / 1000}s rates=-${WK_RATE_RAPID.toFixed(2)}/` +
+            `+${WK_RATE_SLOW}/+${WK_RATE_RAPID.toFixed(2)} %/s\n`;
   header += 'time_s,position,velocity_ms,resistance_pct,power_W\n';
   const blob = new Blob([header + workoutRows.join('\n') + '\n'], { type: 'text/csv' });
   const fname = 'workout_' + new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19) + '.csv';
