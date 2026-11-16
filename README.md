@@ -22,7 +22,19 @@ platformio.ini                 PlatformIO build config (esp32dev / arduino)
 include/config.h               pins, PWM, BLE UUIDs, physics record-of-truth
 src/main.cpp                   firmware: BLE + AS5600 + PWM brake + 25 Hz data push
 dashboard/cardio_dashboard.html  the dashboard (open in Chrome/Edge)
+android/                       native Android app (Kotlin + Compose) — see android/README.md
 ```
+
+## Android app
+
+`android/` is a native **Kotlin + Jetpack Compose** app — the mobile counterpart to the
+web dashboard. It connects to the `CardioDrum` over BLE, varies the brake resistance,
+monitors RPM, computes power, and records **sessions** you start and stop. Each session
+ends with its **cumulative work output (joules)** — an objective number — and is saved to
+an on-device history so sessions can be compared. It reuses the same NUS UUIDs, 16-byte
+frame layout and physics calibration as the firmware and dashboard. Open the `android/`
+folder in Android Studio and Run on a physical device (BLE needs real hardware). Full
+build/usage notes are in [`android/README.md`](android/README.md).
 
 ## Firmware — build & flash
 

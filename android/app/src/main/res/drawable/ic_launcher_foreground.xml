@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Speed-gauge arc -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#60A5FA"
+        android:strokeWidth="5"
+        android:strokeLineCap="round"
+        android:pathData="M36,70 A22,22 0 1 1 72,70" />
+    <!-- Needle -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#4ADE80"
+        android:strokeWidth="4.5"
+        android:strokeLineCap="round"
+        android:pathData="M54,62 L64,46" />
+    <!-- Hub -->
+    <path
+        android:fillColor="#E6EDF3"
+        android:pathData="M54,62 m-4,0 a4,4 0 1,0 8,0 a4,4 0 1,0 -8,0" />
+</vector>
